@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE / RubberBand checkout deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-sampleforge-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure (universal x86_64 + arm64)
+        # Pin the generator so the build layout is deterministic across
+        # machines/runners regardless of what CMake would otherwise pick.
+        run: cmake -S . -B build -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+
+      # JUCE's CMake support always appends $<CONFIG> to its output path
+      # (see JUCEUtils.cmake: `products_folder = base_folder/$<CONFIG>`).
+      # With CMAKE_BUILD_TYPE=Release set above, that means every artefact
+      # lands under an extra .../Release/ folder - hence the path below.
+      - name: Verify universal binaries
+        run: |
+          set -e
+          for f in \
+            "build/SampleForge_artefacts/Release/VST3/SampleForge.vst3/Contents/MacOS/SampleForge" \
+            "build/SampleForge_artefacts/Release/AU/SampleForge.component/Contents/MacOS/SampleForge" \
+            "build/SampleForge_artefacts/Release/Standalone/SampleForge.app/Contents/MacOS/SampleForge"; do
+            echo "== $f =="
+            lipo -info "$f" | grep -q "x86_64 arm64" || { echo "not universal: $f"; exit 1; }
+          done
+
+      - name: Package
+        run: |
+          cd build/SampleForge_artefacts/Release
+          zip -r "${GITHUB_WORKSPACE}/SampleForge-macOS-universal.zip" VST3 AU Standalone
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SampleForge-macOS-universal.zip
+          generate_release_notes: true
