@@ -1,0 +1,28 @@
+# CMake Build directory
+/build/
+/cmake-build-*/
+
+# User-specific CMake settings
+/CMakeUserPresets.json
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.suo
+*.user
+*.user.*
+*.sln
+*.vcxproj
+*.filters
+*.opensdf
+*.sdf
+*.ipch
+*.db
+
+# macOS files
+.DS_Store
+
+# Compiled plugin files/artifacts (just in case they are built outside target dirs)
+*.vst3
+*.component
+*.app
