@@ -30,11 +30,11 @@ A polyphonic multisampled sampler VST built in C++ using the [JUCE Framework](ht
 
 ## Licensing
 
-SampleForge itself has no license file (private project). Its **Time-Stretch** feature vendors the [Rubber Band Library](https://breakfastquay.com/rubberband/) (GPL v2+), fetched and compiled directly into the binary — see `CMakeLists.txt`. That has real implications if this plugin is ever given to someone else:
+SampleForge is licensed under the [GNU GPL v3](LICENSE). Its **Time-Stretch** feature vendors the [Rubber Band Library](https://breakfastquay.com/rubberband/) (GPL v2+), fetched and compiled directly into the binary — see `CMakeLists.txt`. GPL v3 was chosen because it's compatible with Rubber Band's "v2 or later" terms. That has real implications if this plugin is ever given to someone else:
 
 - **Using it privately**: no restriction of any kind, regardless of what you do with the audio it produces.
 - **Sharing a recording/song made with it**: no restriction — GPL covers the *software*, not output produced by using it.
-- **Distributing the plugin binary itself** (even for free, even to one other person): technically GPL "distribution." Compliance just means making SampleForge's own source available to whoever you gave the binary to — trivial if they're already collaborators, since you're not hiding anything from them anyway. To distribute it as closed-source (e.g. selling it, or through an app store — Rubber Band's GPL terms explicitly disallow App Store distribution), a commercial license from Breakfast Quay would be required instead.
+- **Distributing the plugin binary itself** (even for free, even to one other person): technically GPL "distribution," satisfied here since the source is public in this repo. To distribute it as closed-source instead (e.g. selling it, or through an app store — Rubber Band's GPL terms explicitly disallow App Store distribution), a commercial license from Breakfast Quay would be required, and the GPL v3 license here would need to be dropped in favor of one that permits that.
 
 ## Roadmap
 
