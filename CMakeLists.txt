@@ -31,7 +31,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(rubberband)
 
 juce_add_plugin(SampleForge
-    COMPANY_NAME "garyanewsome"
+    COMPANY_NAME "Gary A. Newsome"
     COMPANY_COPYRIGHT "Gary A. Newsome"
     BUNDLE_ID "com.garyanewsome.SampleForge"
     IS_SYNTH TRUE

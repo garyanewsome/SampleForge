@@ -1,19 +1,49 @@
-name: Release
+name: CI
 
 on:
   push:
-    tags:
-      - "v*.*.*"
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  pull_request:
 
 jobs:
-  build-macos:
+  test:
+    name: Build & test
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache JUCE / RubberBand checkout deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-sampleforge-deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+
+  release:
+    name: Build & publish release artifacts
+    needs: test
+    # Only ever cut a release from a tag that's actually on main - never
+    # from a test/POC branch, even if someone tags one by mistake.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "${{ github.sha }}" origin/main; then
+            echo "::error::Tag ${{ github.ref_name }} is not reachable from main - refusing to publish a release."
+            exit 1
+          fi
 
       - name: Cache JUCE / RubberBand checkout deps
         uses: actions/cache@v4
