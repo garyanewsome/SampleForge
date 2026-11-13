@@ -26,3 +26,5 @@
 *.vst3
 *.component
 *.app
+/cmake-build-asan/
+/cmake-build/

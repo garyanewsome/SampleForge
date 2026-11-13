@@ -38,7 +38,9 @@ private:
     enum class DragTarget { none, start, end };
 
     SampleForgeAudioProcessor& audioProcessor;
-    juce::AudioThumbnail* observedThumbnail = nullptr;
+    // Holding the zone (not just its thumbnail) keeps the thumbnail alive until
+    // we have stopped listening to it, even if the zone is removed meanwhile.
+    juce::SynthesiserSound::Ptr observedZone;
     DragTarget dragging = DragTarget::none;
     bool fileDragHover = false;
 

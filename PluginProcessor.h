@@ -22,7 +22,7 @@ public:
         // rrSuppressed is set by SampleForgeSynthesiser::noteOn() just before this
         // is checked, to make round-robin/random cycling pick exactly one zone
         // per group per hit instead of layering every zone in the group.
-        if (rrSuppressed.load())
+        if (rrSuppressed.load() || velSuppressed.load())
             return false;
 
         return midiNoteNumber >= keyLow.load() && midiNoteNumber <= keyHigh.load();
@@ -58,6 +58,16 @@ public:
     // group to actually sound per hit instead of layering all of them.
     std::atomic<int> rrGroup { 0 };
     std::atomic<bool> rrSuppressed { false };
+
+    // Set by SampleForgeSynthesiser::noteOn() for zones whose velocity range
+    // doesn't include the incoming note. Rejecting here (rather than in
+    // startNote) matters: juce::Synthesiser grabs - and if need be steals - a
+    // voice for every sound appliesToNote() accepts, before startNote runs.
+    std::atomic<bool> velSuppressed { false };
+
+    // True when the file could not be found/decoded on restore. The zone keeps
+    // its path and settings (so saving again doesn't lose them) but is silent.
+    bool missing = false;
 };
 
 //==============================================================================
@@ -241,6 +251,7 @@ public:
     void removeZone(int index);
 
     int getNumZones() const;
+    int getActiveVoiceCount() const;
     SampleForgeSound* getZone(int index) const;
 
     int getSelectedZoneIndex() const { return selectedZoneIndex; }
@@ -262,7 +273,8 @@ private:
     // key/vel/root/trim/reverse/pan/gain/rrGroup instead of these defaults.
     bool loadZoneInternal(const juce::File& file, int keyLow, int keyHigh, int velLow, int velHigh,
                           int rootNote, float sampleStart, float sampleEnd,
-                          bool reverse = false, float pan = 0.0f, float gain = 1.0f, int rrGroup = 0);
+                          bool reverse = false, float pan = 0.0f, float gain = 1.0f, int rrGroup = 0,
+                          bool keepIfMissing = false);
 
     // Shared by getStateInformation()/savePresetToFile() and by
     // setStateInformation()/loadPresetFromFile() respectively — a "preset"

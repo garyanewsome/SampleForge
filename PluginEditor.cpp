@@ -32,8 +32,9 @@ WaveformDisplay::WaveformDisplay(SampleForgeAudioProcessor& processor)
 
 WaveformDisplay::~WaveformDisplay()
 {
-    if (observedThumbnail != nullptr)
-        observedThumbnail->removeChangeListener(this);
+    if (auto* old = dynamic_cast<SampleForgeSound*>(observedZone.get()))
+        if (old->thumbnail != nullptr)
+            old->thumbnail->removeChangeListener(this);
 
     audioProcessor.removeChangeListener(this);
 }
@@ -44,7 +45,7 @@ void WaveformDisplay::changeListenerCallback(juce::ChangeBroadcaster* source)
     // case we might need to listen to a different zone's thumbnail now), or
     // the currently-observed thumbnail itself reporting new peak data as it
     // loads in the background — either way, just repaint.
-    if (source != observedThumbnail)
+    if (dynamic_cast<juce::AudioThumbnail*>(source) == nullptr)
         attachToSelectedZoneThumbnail();
 
     repaint();
@@ -53,18 +54,18 @@ void WaveformDisplay::changeListenerCallback(juce::ChangeBroadcaster* source)
 void WaveformDisplay::attachToSelectedZoneThumbnail()
 {
     auto* zone = audioProcessor.getZone(audioProcessor.getSelectedZoneIndex());
-    auto* newThumbnail = zone != nullptr ? zone->thumbnail.get() : nullptr;
 
-    if (newThumbnail == observedThumbnail)
+    if (zone == observedZone.get())
         return;
 
-    if (observedThumbnail != nullptr)
-        observedThumbnail->removeChangeListener(this);
+    if (auto* old = dynamic_cast<SampleForgeSound*>(observedZone.get()))
+        if (old->thumbnail != nullptr)
+            old->thumbnail->removeChangeListener(this);
 
-    observedThumbnail = newThumbnail;
+    observedZone = zone;
 
-    if (observedThumbnail != nullptr)
-        observedThumbnail->addChangeListener(this);
+    if (zone != nullptr && zone->thumbnail != nullptr)
+        zone->thumbnail->addChangeListener(this);
 }
 
 void WaveformDisplay::paint(juce::Graphics& g)
@@ -601,14 +602,14 @@ void SampleForgeAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Grap
 
     auto noteName = [](int note) { return juce::MidiMessage::getMidiNoteName(note, true, true, 3); };
 
-    juce::String text = juce::File(zone->filePath).getFileNameWithoutExtension()
+    juce::String text = juce::String(zone->missing ? "[MISSING] " : "") + juce::File(zone->filePath).getFileNameWithoutExtension()
                        + "  |  " + noteName(zone->keyLow.load()) + "-" + noteName(zone->keyHigh.load())
                        + "  |  vel " + juce::String(zone->velLow.load()) + "-" + juce::String(zone->velHigh.load())
                        + "  |  root " + noteName(zone->rootNote.load())
                        + (zone->reverse.load() ? "  |  REV" : "")
                        + (zone->rrGroup.load() > 0 ? "  |  RR" + juce::String(zone->rrGroup.load()) : "");
 
-    g.setColour(juce::Colours::white);
+    g.setColour(zone->missing ? juce::Colour(0xffff6b6b) : juce::Colours::white);
     g.setFont(13.0f);
     g.drawText(text, 6, 0, width - 10, height, juce::Justification::centredLeft, true);
 }

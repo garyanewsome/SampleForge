@@ -87,3 +87,31 @@ target_link_libraries(SampleForge
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags
 )
+
+# Headless tests (not part of the default build):
+#   cmake --build <dir> --target SampleForgeTests && <dir>/SampleForgeTests_artefacts/Release/SampleForgeTests
+juce_add_console_app(SampleForgeTests PRODUCT_NAME "SampleForgeTests")
+set_target_properties(SampleForgeTests PROPERTIES EXCLUDE_FROM_ALL TRUE)
+juce_generate_juce_header(SampleForgeTests)
+target_sources(SampleForgeTests PRIVATE
+    Tests/SampleForgeTests.cpp
+    PluginProcessor.cpp
+    PluginEditor.cpp
+    "${rubberband_SOURCE_DIR}/single/RubberBandSingle.cpp"
+)
+target_include_directories(SampleForgeTests PRIVATE . "${rubberband_SOURCE_DIR}")
+target_compile_definitions(SampleForgeTests PRIVATE
+    JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 HAVE_VDSP=1 USE_BQRESAMPLER=1 JUCE_MODAL_LOOPS_PERMITTED=1
+    JucePlugin_Name="SampleForge")
+target_link_libraries(SampleForgeTests PRIVATE
+    juce::juce_audio_utils
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_dsp
+    juce::juce_gui_extra
+    juce::juce_gui_basics
+    juce::juce_graphics
+    juce::juce_events
+    juce::juce_core
+    juce::juce_recommended_config_flags
+    ${ACCELERATE_FRAMEWORK})

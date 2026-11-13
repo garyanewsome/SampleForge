@@ -260,8 +260,13 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
 
     if (useStretch)
     {
+        // The stretcher is fed source samples but runs at the host rate, so its
+        // time ratio has to include the rate difference or a 44.1 kHz file in a
+        // 48 kHz session would stretch to the wrong length. (pitchRatio already
+        // folds the same rate difference in.)
+        double rateRatio = getSampleRate() / currentSound->sourceSampleRate;
         stretcher->setPitchScale(pitchRatio);
-        stretcher->setTimeRatio(static_cast<double>(stretchRatio));
+        stretcher->setTimeRatio(static_cast<double>(stretchRatio) * rateRatio);
 
         bool stillPlaying = fillStretchedBlock(numSamples);
 
@@ -385,6 +390,20 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
         float env = adsr.getNextSample();
         lastEnvValue = env;
 
+        // Short fade out over the last ~2 ms before the trim End (or Start when
+        // reversed), so a one-shot never ends on a hard cut. Looping modes never
+        // reach their end, so they are left alone.
+        float endFade = 1.0f;
+        if (loopMode == LoopMode::off)
+        {
+            double remaining = loopDirection > 0 ? endSampleInSource - sourcePosition
+                                                  : sourcePosition - startSampleInSource;
+            double fadeOutSamples = 0.002 * getSampleRate();
+            double remainingOut = remaining / juce::jmax(pitchRatio, 1.0e-6);
+            if (remainingOut < fadeOutSamples)
+                endFade = static_cast<float>(juce::jmax(0.0, remainingOut / fadeOutSamples));
+        }
+
         int lastIndex = sourceData.getNumSamples() - 1;
         int idx0 = juce::jlimit(0, lastIndex, static_cast<int>(sourcePosition));
         int idxM1 = juce::jmax(idx0 - 1, 0);
@@ -413,7 +432,7 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
 
             float channelPanGain = (channel == 0) ? leftGain : rightGain;
             outputBuffer.addSample(channel, startSample + sample,
-                                    filtered * level * env * gain * zoneGain * channelPanGain);
+                                    filtered * level * env * endFade * gain * zoneGain * channelPanGain);
         }
 
         sourcePosition += pitchRatio * loopDirection;
@@ -425,11 +444,16 @@ void SampleForgeSynthesiser::noteOn(int midiChannel, int midiNoteNumber, float v
 {
     int velocityByte = juce::roundToInt(velocity * 127.0f);
 
-    // Reset every zone's suppression flag first, so a group loss decided for
-    // some earlier note never lingers and silences an unrelated future note.
+    // Reset every zone's suppression flags first, so a decision made for some
+    // earlier note never lingers and silences an unrelated future note. Zones
+    // outside this note's velocity range are switched off here, before the base
+    // class allocates voices, so they can never take or steal one.
     for (int i = 0; i < getNumSounds(); ++i)
         if (auto* zone = dynamic_cast<SampleForgeSound*>(getSound(i).get()))
+        {
             zone->rrSuppressed = false;
+            zone->velSuppressed = velocityByte < zone->velLow.load() || velocityByte > zone->velHigh.load();
+        }
 
     // Collect, per round-robin group, the zones that actually match this
     // note+velocity (group 0 means "no group": always independently eligible).
@@ -447,8 +471,7 @@ void SampleForgeSynthesiser::noteOn(int midiChannel, int midiNoteNumber, float v
             continue;
 
         bool keyMatches = midiNoteNumber >= zone->keyLow.load() && midiNoteNumber <= zone->keyHigh.load();
-        bool velMatches = velocityByte >= zone->velLow.load() && velocityByte <= zone->velHigh.load();
-        if (!keyMatches || !velMatches)
+        if (!keyMatches || zone->velSuppressed.load())
             continue;
 
         int& count = groupCounts[group];
@@ -569,18 +592,27 @@ juce::AudioProcessorValueTreeState::ParameterLayout SampleForgeAudioProcessor::c
 bool SampleForgeAudioProcessor::loadZoneInternal(const juce::File& file, int keyLow, int keyHigh,
                                                   int velLow, int velHigh, int rootNote,
                                                   float sampleStart, float sampleEnd,
-                                                  bool reverse, float pan, float gain, int rrGroup)
+                                                  bool reverse, float pan, float gain, int rrGroup,
+                                                  bool keepIfMissing)
 {
-    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+    std::unique_ptr<juce::AudioFormatReader> reader(file.existsAsFile() ? formatManager.createReaderFor(file) : nullptr);
 
-    if (reader == nullptr)
+    if (reader == nullptr && !keepIfMissing)
         return false;
 
-    juce::AudioBuffer<float> newBuffer(
-        static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
-    reader->read(&newBuffer, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
+    // A restored zone whose file has gone is kept as a silent placeholder, so
+    // its settings survive a save and it comes back once the file reappears.
+    juce::AudioBuffer<float> newBuffer;
+    double sourceRate = 44100.0;
+    if (reader != nullptr)
+    {
+        newBuffer.setSize(static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
+        reader->read(&newBuffer, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
+        sourceRate = reader->sampleRate;
+    }
 
-    auto* newSound = new SampleForgeSound(std::move(newBuffer), reader->sampleRate, file.getFullPathName());
+    auto* newSound = new SampleForgeSound(std::move(newBuffer), sourceRate, file.getFullPathName());
+    newSound->missing = reader == nullptr;
     newSound->keyLow = keyLow;
     newSound->keyHigh = keyHigh;
     newSound->velLow = velLow;
@@ -597,7 +629,8 @@ bool SampleForgeAudioProcessor::loadZoneInternal(const juce::File& file, int key
     // peak data for drawing; decoupled from the full in-RAM `data` buffer
     // used for playback, so the editor never has to rescan samples itself.
     newSound->thumbnail = std::make_unique<juce::AudioThumbnail>(128, formatManager, thumbnailCache);
-    newSound->thumbnail->setSource(new juce::FileInputSource(file));
+    if (reader != nullptr)
+        newSound->thumbnail->setSource(new juce::FileInputSource(file));
 
     // juce::Synthesiser locks internally around addSound()/removeSound() and
     // renderNextBlock(), so this is safe even if the audio thread is mid-block
@@ -625,6 +658,15 @@ void SampleForgeAudioProcessor::removeZone(int index)
         selectedZoneIndex = synth.getNumSounds() - 1;
 
     sendChangeMessage();
+}
+
+int SampleForgeAudioProcessor::getActiveVoiceCount() const
+{
+    int active = 0;
+    for (int i = 0; i < synth.getNumVoices(); ++i)
+        if (synth.getVoice(i)->isVoiceActive())
+            ++active;
+    return active;
 }
 
 int SampleForgeAudioProcessor::getNumZones() const
@@ -801,8 +843,6 @@ void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlS
              zoneXml = zoneXml->getNextElementWithTagName("ZONE"))
         {
             juce::File file(zoneXml->getStringAttribute("path"));
-            if (!file.existsAsFile())
-                continue;
 
             loadZoneInternal(file,
                               zoneXml->getIntAttribute("keyLow", 0),
@@ -815,7 +855,8 @@ void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlS
                               zoneXml->getBoolAttribute("reverse", false),
                               static_cast<float>(zoneXml->getDoubleAttribute("pan", 0.0)),
                               static_cast<float>(zoneXml->getDoubleAttribute("gain", 1.0)),
-                              zoneXml->getIntAttribute("rrGroup", 0));
+                              zoneXml->getIntAttribute("rrGroup", 0),
+                              true);
         }
     }
 
