@@ -4,9 +4,9 @@ cmake_minimum_required(VERSION 3.15)
 # before project() — CMake locks in the target architecture(s) at that point,
 # so setting it later has no effect on macOS.
 set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "Target architectures for macOS" FORCE)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "14.0" CACHE STRING "Target macOS deployment version" FORCE)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Target macOS deployment version" FORCE)
 
-project(SampleForge VERSION 1.0.0)
+project(SampleForge VERSION 1.0.2)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

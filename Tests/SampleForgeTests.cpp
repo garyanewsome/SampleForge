@@ -231,6 +231,74 @@ int main()
         check(true, "remove both zones, pump messages, close the editor (run under ASan to be sure)");
     }
 
+    {
+        std::cout << "[7] Forward loops wrap without a click\n";
+        // A rising ramp, so the loop end (high) and start (low) are far apart.
+        auto f = tempDir().getChildFile("ramp.wav");
+        {
+            f.deleteFile();
+            juce::AudioBuffer<float> b(2, 1000);
+            for (int i = 0; i < 1000; ++i) { b.setSample(0, i, i / 1000.0f); b.setSample(1, i, i / 1000.0f); }
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::FileOutputStream> out(f.createOutputStream());
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(out.get(), 48000, 2, 24, {}, 0));
+            out.release();
+            w->writeFromAudioSampleBuffer(b, 0, 1000);
+        }
+        auto biggestStep = [&](int loopMode) {
+            Rig r;
+            r.proc.addZoneFromFile(f);
+            setParam(r.proc, "LOOP_MODE", (float) loopMode);
+            setParam(r.proc, "ATTACK", 0.001f);
+            auto out = r.render(60, { { 60, 1.0f } });
+            float worst = 0;
+            for (int i = 600; i < (int) out.size(); ++i) { float d = std::abs(out[(size_t) i] - out[(size_t) i - 1]); worst = std::max(worst, d); }
+            return worst;
+        };
+        float fwd = biggestStep(1);
+        check(fwd < 0.04f, "forward loop: largest step " + juce::String(fwd, 3) + " (a bare wrap jumps by ~1.0)");
+        check(biggestStep(2) < 0.04f, "ping-pong loop stays smooth too");
+    }
+
+    {
+        std::cout << "[8] Presets find their samples after a move; dropping a file relinks a missing zone\n";
+        auto dirA = tempDir().getChildFile("presetA"); dirA.deleteRecursively(); dirA.createDirectory();
+        auto dirB = tempDir().getChildFile("presetB"); dirB.deleteRecursively();
+        auto wavA = makeWav("presetA/kick.wav", 48000, 24000, 0, 110.0f);
+        auto presetFile = dirA.getChildFile("kit.sfpreset");
+        {
+            Rig r;
+            r.proc.addZoneFromFile(wavA);
+            r.proc.getZone(0)->keyLow = 36;
+            r.proc.getZone(0)->keyHigh = 48;
+            check(r.proc.savePresetToFile(presetFile), "preset saved next to its sample");
+        }
+        dirA.moveFileTo(dirB);                                   // the whole folder moves
+        {
+            Rig r;
+            check(r.proc.loadPresetFromFile(dirB.getChildFile("kit.sfpreset")), "moved preset loads");
+            auto* z = r.proc.getZone(0);
+            check(z != nullptr && !z->missing && z->keyLow.load() == 36, "its sample was found beside it");
+        }
+        // Relink: a missing zone adopts a dropped file of the same name and keeps its settings.
+        {
+            Rig r;
+            r.proc.addZoneFromFile(dirB.getChildFile("kick.wav"));
+            r.proc.getZone(0)->keyLow = 30;
+            juce::MemoryBlock st; r.proc.getStateInformation(st);
+            auto moved = dirB.getChildFile("kick.wav").moveFileTo(tempDir().getChildFile("kick_elsewhere.wav"));
+            Rig q;
+            q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            check(q.proc.getZone(0) != nullptr && q.proc.getZone(0)->missing, "with the file gone the zone is missing");
+            auto back = dirB.getChildFile("kick.wav");
+            tempDir().getChildFile("kick_elsewhere.wav").moveFileTo(back);
+            q.proc.addZoneFromFile(back);
+            check(q.proc.getNumZones() == 1 && !q.proc.getZone(0)->missing && q.proc.getZone(0)->keyLow.load() == 30,
+                  "dropping the file relinks the same zone with its settings");
+            (void) moved;
+        }
+    }
+
     std::cout << (failures == 0 ? "\nALL PASSED\n" : "\nFAILURES: " + juce::String(failures) + "\n");
     return failures == 0 ? 0 : 1;
 }

@@ -50,6 +50,7 @@ void SampleForgeVoice::startNote(int midiNoteNumber, float velocity, juce::Synth
     }
 
     level = velocity;
+    tailRemaining = 0;
 
     float rootNote = static_cast<float>(currentSound->rootNote.load());
     double sourceLength = static_cast<double>(currentSound->data.getNumSamples());
@@ -324,6 +325,24 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
 
     double loopLength = loopEnd - startSampleInSource;
 
+    // 4-point, 3rd-order Lagrange interpolation (Niemitalo/musicdsp.org) for
+    // smooth pitched playback; positions are clamped to the sample data.
+    const int lastIndex = sourceData.getNumSamples() - 1;
+    auto lagrange = [lastIndex](const float* d, double pos)
+    {
+        pos = juce::jlimit(0.0, static_cast<double>(lastIndex), pos); // hold the edge sample rather than extrapolate past it
+        int idx0 = juce::jlimit(0, lastIndex, static_cast<int>(pos));
+        int idxM1 = juce::jmax(idx0 - 1, 0);
+        int idx1 = juce::jmin(idx0 + 1, lastIndex);
+        int idx2 = juce::jmin(idx0 + 2, lastIndex);
+        float frac = static_cast<float>(pos - idx0);
+        float yM1 = d[idxM1], y0 = d[idx0], y1 = d[idx1], y2 = d[idx2];
+        float c1 = y1 - (1.0f / 3.0f) * yM1 - 0.5f * y0 - (1.0f / 6.0f) * y2;
+        float c2 = 0.5f * (yM1 + y1) - y0;
+        float c3 = (1.0f / 6.0f) * (y2 - yM1) + 0.5f * (y0 - y1);
+        return ((c3 * frac + c2) * frac + c1) * frac + y0;
+    };
+
     for (int sample = 0; sample < numSamples; ++sample)
     {
         if (loopMode == LoopMode::off)
@@ -340,6 +359,15 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
         {
             if (loopLength > 0.0)
             {
+                const bool wrapsForward = loopDirection > 0 ? sourcePosition >= loopEnd
+                                                            : sourcePosition <= startSampleInSource;
+                if (wrapsForward)
+                {
+                    tailPosition = sourcePosition;
+                    tailTotal = juce::jmax(1, static_cast<int>(0.003 * getSampleRate()));
+                    tailRemaining = tailTotal;
+                }
+
                 if (loopDirection > 0)
                 {
                     while (sourcePosition >= loopEnd)
@@ -404,35 +432,28 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
                 endFade = static_cast<float>(juce::jmax(0.0, remainingOut / fadeOutSamples));
         }
 
-        int lastIndex = sourceData.getNumSamples() - 1;
-        int idx0 = juce::jlimit(0, lastIndex, static_cast<int>(sourcePosition));
-        int idxM1 = juce::jmax(idx0 - 1, 0);
-        int idx1 = juce::jmin(idx0 + 1, lastIndex);
-        int idx2 = juce::jmin(idx0 + 2, lastIndex);
-        float frac = static_cast<float>(sourcePosition - idx0);
-
         for (int channel = 0; channel < numOutputChannels; ++channel)
         {
             int sourceChannel = juce::jmin(channel, numSourceChannels - 1);
             const float* channelData = sourceData.getReadPointer(sourceChannel);
 
-            // 4-point, 3rd-order Lagrange interpolation (Niemitalo/musicdsp.org),
-            // replacing the old linear interpolation for smoother pitched playback.
-            float yM1 = channelData[idxM1];
-            float y0 = channelData[idx0];
-            float y1 = channelData[idx1];
-            float y2 = channelData[idx2];
-
-            float c0 = y0;
-            float c1 = y1 - (1.0f / 3.0f) * yM1 - 0.5f * y0 - (1.0f / 6.0f) * y2;
-            float c2 = 0.5f * (yM1 + y1) - y0;
-            float c3 = (1.0f / 6.0f) * (y2 - yM1) + 0.5f * (y0 - y1);
-            float interpolated = ((c3 * frac + c2) * frac + c1) * frac + c0;
+            float interpolated = lagrange(channelData, sourcePosition);
+            if (tailRemaining > 0)
+            {
+                float t = static_cast<float>(tailRemaining) / static_cast<float>(tailTotal);
+                interpolated = interpolated * (1.0f - t) + lagrange(channelData, tailPosition) * t;
+            }
             float filtered = filter.processSample(channel, interpolated);
 
             float channelPanGain = (channel == 0) ? leftGain : rightGain;
             outputBuffer.addSample(channel, startSample + sample,
                                     filtered * level * env * endFade * gain * zoneGain * channelPanGain);
+        }
+
+        if (tailRemaining > 0)
+        {
+            tailPosition += pitchRatio * loopDirection;
+            --tailRemaining;
         }
 
         sourcePosition += pitchRatio * loopDirection;
@@ -643,6 +664,25 @@ bool SampleForgeAudioProcessor::loadZoneInternal(const juce::File& file, int key
 
 void SampleForgeAudioProcessor::addZoneFromFile(const juce::File& file)
 {
+    for (int i = 0; i < synth.getNumSounds(); ++i)
+    {
+        auto* zone = getZone(i);
+        if (zone != nullptr && zone->missing && juce::File(zone->filePath).getFileName() == file.getFileName())
+        {
+            // Relink: same settings, new file. The old placeholder is dropped.
+            if (loadZoneInternal(file, zone->keyLow.load(), zone->keyHigh.load(), zone->velLow.load(),
+                                 zone->velHigh.load(), zone->rootNote.load(), zone->sampleStart.load(),
+                                 zone->sampleEnd.load(), zone->reverse.load(), zone->pan.load(),
+                                 zone->gain.load(), zone->rrGroup.load()))
+            {
+                synth.removeSound(i);
+                selectedZoneIndex = synth.getNumSounds() - 1;
+                sendChangeMessage();
+            }
+            return;
+        }
+    }
+
     if (loadZoneInternal(file, 0, 127, 0, 127, 60, 0.0f, 1.0f))
         sendChangeMessage();
 }
@@ -801,7 +841,7 @@ juce::AudioProcessorEditor* SampleForgeAudioProcessor::createEditor()
 }
 
 //==============================================================================
-std::unique_ptr<juce::XmlElement> SampleForgeAudioProcessor::buildStateXml()
+std::unique_ptr<juce::XmlElement> SampleForgeAudioProcessor::buildStateXml(const juce::File& presetFolder)
 {
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml(state.createXml());
@@ -813,6 +853,8 @@ std::unique_ptr<juce::XmlElement> SampleForgeAudioProcessor::buildStateXml()
         {
             auto* zoneXml = zonesXml->createNewChildElement("ZONE");
             zoneXml->setAttribute("path", zone->filePath);
+            if (presetFolder != juce::File())
+                zoneXml->setAttribute("relPath", juce::File(zone->filePath).getRelativePathFrom(presetFolder));
             zoneXml->setAttribute("rootNote", zone->rootNote.load());
             zoneXml->setAttribute("keyLow", zone->keyLow.load());
             zoneXml->setAttribute("keyHigh", zone->keyHigh.load());
@@ -830,7 +872,7 @@ std::unique_ptr<juce::XmlElement> SampleForgeAudioProcessor::buildStateXml()
     return xml;
 }
 
-void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlState)
+void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlState, const juce::File& presetFolder)
 {
     apvts.replaceState(juce::ValueTree::fromXml(xmlState));
 
@@ -843,6 +885,17 @@ void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlS
              zoneXml = zoneXml->getNextElementWithTagName("ZONE"))
         {
             juce::File file(zoneXml->getStringAttribute("path"));
+
+            if (!file.existsAsFile() && presetFolder != juce::File())
+            {
+                auto relative = zoneXml->getStringAttribute("relPath");
+                auto beside = relative.isNotEmpty() ? presetFolder.getChildFile(relative) : juce::File();
+                auto sameFolder = presetFolder.getChildFile(file.getFileName());
+                if (beside.existsAsFile())
+                    file = beside;
+                else if (sameFolder.existsAsFile())
+                    file = sameFolder;
+            }
 
             loadZoneInternal(file,
                               zoneXml->getIntAttribute("keyLow", 0),
@@ -880,7 +933,7 @@ void SampleForgeAudioProcessor::setStateInformation(const void* data, int sizeIn
 
 bool SampleForgeAudioProcessor::savePresetToFile(const juce::File& file)
 {
-    return buildStateXml()->writeTo(file);
+    return buildStateXml(file.getParentDirectory())->writeTo(file);
 }
 
 bool SampleForgeAudioProcessor::loadPresetFromFile(const juce::File& file)
@@ -890,7 +943,7 @@ bool SampleForgeAudioProcessor::loadPresetFromFile(const juce::File& file)
     if (xmlState == nullptr || !xmlState->hasTagName(apvts.state.getType()))
         return false;
 
-    restoreStateFromXml(*xmlState);
+    restoreStateFromXml(*xmlState, file.getParentDirectory());
     return true;
 }
 

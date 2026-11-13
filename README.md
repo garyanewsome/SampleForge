@@ -16,6 +16,8 @@ A polyphonic multisampled sampler VST built in C++ using the [JUCE Framework](ht
 - **Drag-and-Drop**: Drop an audio file onto the waveform view (or anywhere else in the window) to add it as a new zone, no file picker required.
 - **Looping**: Forward and ping-pong looping between a zone's Start/End trim points, selectable via the Loop control; trim handles double as live loop points. An optional Loop Sync rate (1/1 down to 1/16) overrides the free-running loop length with one derived from the host's tempo instead.
 - **Polyphonic ADSR**: Full envelope control (Attack, Decay, Sustain, Release) across all voices and zones, re-evaluated every block so trim/envelope tweaks are heard immediately.
+- **Click-free playback**: One-shots fade out over their last 2 ms, and forward loops crossfade (3 ms) across the wrap point.
+- **Missing-sample recovery**: A sample that can't be found is kept as a silent `[MISSING]` zone with all its settings. Presets remember each sample's location relative to the preset file and look for it beside the preset when it has moved; dropping a file of the same name onto the plugin relinks the zone.
 - **Session Persistence**: Every zone's file path, key/velocity range, root note, trim, reverse/pan/gain/RR-group setting, plus all envelope/loop/filter settings, are saved with the plugin state and restored on reload.
 - **Preset Save/Load**: The entire instrument (every zone plus all global settings) can be saved to or loaded from a standalone `.sfpreset` file, independent of any DAW project.
 - **Cached Waveform Display**: Each zone builds its own `juce::AudioThumbnail` once on load, so the waveform view never rescans sample data on zone switches or window resizes, and stays responsive on long material.
@@ -23,7 +25,7 @@ A polyphonic multisampled sampler VST built in C++ using the [JUCE Framework](ht
 
 ## Architecture & Code Map
 
-* `CMakeLists.txt` - Project structure configuration using `FetchContent`. Builds a universal (Intel + Apple Silicon) binary.
+* `CMakeLists.txt` - Project structure configuration using `FetchContent`. Builds a universal (Intel + Apple Silicon) binary for macOS 13 (Ventura) or newer.
 * `PluginProcessor.h/cpp` - The audio core logic. Defines `SampleForgeSound` (one zone: buffer, key/velocity range, root note, trim, reverse/pan/gain/RR-group, cached `AudioThumbnail`), `SampleForgeVoice` (per-voice filter, tempo-synced looping, and RubberBandStretcher-backed time-stretch), `SampleForgeSynthesiser` (round-robin note-on routing), zone loading, and state/preset management.
 * `PluginEditor.h/cpp` - The visual interface, including the zone list, per-zone controls, the draggable/drop-target `WaveformDisplay` component, and parameter binding.
 * `SampleForgeLookAndFeel.h` - The flat, single-accent-color visual theme applied across all controls.
@@ -55,6 +57,13 @@ cmake --build build
 ```
 
 The resulting plugins will be placed in `build/SampleForge_artefacts/Release/`.
+
+## Tests
+
+```bash
+cmake --build build --target SampleForgeTests
+build/SampleForgeTests_artefacts/Release/SampleForgeTests
+```
 
 ## How To Run Without A DAW
 

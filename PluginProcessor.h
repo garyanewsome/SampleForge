@@ -142,6 +142,13 @@ private:
     SampleForgeSound* currentSound = nullptr;
     double sourcePosition = 0.0;
     double pitchRatio = 1.0;
+
+    // Forward-loop declick: when the loop wraps, the old read position keeps
+    // playing for a few ms while fading out under the new one fading in, so
+    // the jump from loop end back to start is smeared instead of a click.
+    double tailPosition = 0.0;
+    int tailRemaining = 0;
+    int tailTotal = 1;
     double startSampleInSource = 0.0;
     double endSampleInSource = 0.0;
     int loopDirection = 1;
@@ -244,6 +251,10 @@ public:
     // (full key/velocity range by default), selecting it. juce::Synthesiser
     // guards addSound()/removeSound() with its own internal lock, so this is
     // safe to call while the audio thread is mid-renderNextBlock.
+    //
+    // If a zone is currently flagged missing and has this same file name, that
+    // zone is relinked to the new file (keeping its key/velocity/trim settings)
+    // instead of a duplicate being added.
     void addZoneFromFile(const juce::File& file);
 
     // Removes a zone by index. Any voice currently playing it keeps it alive
@@ -280,8 +291,12 @@ private:
     // setStateInformation()/loadPresetFromFile() respectively — a "preset"
     // is just this same state XML written to/read from a standalone file
     // instead of embedded in the host's session.
-    std::unique_ptr<juce::XmlElement> buildStateXml();
-    void restoreStateFromXml(const juce::XmlElement& xmlState);
+    //
+    // A preset file also records each sample's path relative to the preset, and
+    // on load a missing sample is searched for next to it, so a preset folder
+    // keeps working when moved or shared together with its samples.
+    std::unique_ptr<juce::XmlElement> buildStateXml(const juce::File& presetFolder = {});
+    void restoreStateFromXml(const juce::XmlElement& xmlState, const juce::File& presetFolder = {});
 
     // Declared before `synth` on purpose: members are destroyed in reverse
     // declaration order, and each zone's AudioThumbnail (owned via `synth`'s
