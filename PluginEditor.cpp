@@ -301,7 +301,7 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     addAndMakeVisible(fileNameLabel);
 
     loopModeLabel.setText("Loop", juce::dontSendNotification);
-    loopModeLabel.setJustificationType(juce::Justification::centredRight);
+    loopModeLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(loopModeLabel);
 
     loopModeBox.addItemList({ "Off", "Forward", "Ping-Pong" }, 1);
@@ -310,7 +310,7 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     addAndMakeVisible(loopModeBox);
 
     loopSyncLabel.setText("Sync", juce::dontSendNotification);
-    loopSyncLabel.setJustificationType(juce::Justification::centredRight);
+    loopSyncLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(loopSyncLabel);
 
     loopSyncBox.addItemList({ "Off", "1/1", "1/2", "1/4", "1/8", "1/16" }, 1);
@@ -370,13 +370,14 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     // message (see refreshZoneDetailControls).
     auto setupZoneSlider = [this](juce::Slider& s, juce::Label& l, const juce::String& labelText)
     {
-        s.setSliderStyle(juce::Slider::LinearHorizontal);
-        s.setTextBoxStyle(juce::Slider::TextBoxRight, false, 54, 20);
+        s.setSliderStyle(juce::Slider::LinearVertical);
+        s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 60, 20);
         s.setRange(0.0, 127.0, 1.0);
         s.setEnabled(false);
         addAndMakeVisible(s);
 
         l.setText(labelText, juce::dontSendNotification);
+        l.setJustificationType(juce::Justification::centred);
         addAndMakeVisible(l);
     };
 
@@ -516,16 +517,11 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     setupSlider(stretchSlider, stretchLabel, "Stretch", stretchAtt, "STRETCH");
     // Playback's other controls (Loop/Sync) are horizontal label+combo rows;
     // match that instead of the vertical style setupSlider defaults to.
-    stretchSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    stretchSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
-    stretchLabel.setJustificationType(juce::Justification::centredRight);
+    // Stretch and Bend are vertical faders like the rest (setupSlider's default).
 
     setupSlider(bendSlider, bendLabel, "Bend", bendAtt, "BEND_RANGE");
-    bendSlider.setSliderStyle(juce::Slider::LinearHorizontal);
-    bendSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
     bendSlider.setNumDecimalPlacesToDisplay(0);
     bendSlider.setTextValueSuffix(" st");
-    bendLabel.setJustificationType(juce::Justification::centredRight);
 
     // Raw floats (seconds, 0-1 fraction) read awkwardly on a control surface;
     // show Attack/Decay/Release in milliseconds and Sustain/Gain as a percentage.
@@ -780,42 +776,49 @@ void SampleForgeAudioProcessorEditor::resized()
     //==========================================================================
     // Zone panel: zone list + per-zone controls, including RR Group right
     // next to RR Order since the two only make sense together.
+    auto layoutVerticalSlider = [&](juce::Rectangle<int> content, int width, juce::Slider& sl, juce::Label& l, int index)
+    {
+        auto column = content.withX(content.getX() + width * index).withWidth(width);
+        l.setBounds(column.removeFromTop(20));
+        sl.setBounds(column);
+    };
+
     zonePanelBounds = area.removeFromTop(224);
     area.removeFromTop(6); // breathing room between the brackets of the two rows
     auto zonePanel = zonePanelBounds.reduced(10, 4);
     zonePanel.removeFromTop(panelHeaderHeight);
 
+    // Left: the zone list with its Remove button underneath.
     auto zoneListArea = zonePanel.removeFromLeft(360);
-    auto zoneButtonRow = zoneListArea.removeFromBottom(26);
-    removeZoneButton.setBounds(zoneButtonRow.removeFromLeft(zoneButtonRow.getWidth() * 2 / 3));
-    reverseButton.setBounds(zoneButtonRow);
+    removeZoneButton.setBounds(zoneListArea.removeFromBottom(26));
     zoneListArea.removeFromBottom(4);
     zoneListBox.setBounds(zoneListArea);
+    zonePanel.removeFromLeft(14);
 
-    zonePanel.removeFromLeft(20);
-    auto zoneDetailColumn = zonePanel.removeFromLeft(juce::jmin(zonePanel.getWidth(), 560));
-    constexpr int numZoneRows = 8;
-    int zoneRowHeight = zoneDetailColumn.getHeight() / numZoneRows;
-    auto layoutZoneRow = [&](juce::Component& s, juce::Label& l, int index)
-    {
-        auto row = zoneDetailColumn.withY(zoneDetailColumn.getY() + zoneRowHeight * index).withHeight(zoneRowHeight);
-        l.setBounds(row.removeFromLeft(60));
-        s.setBounds(row);
-    };
-    layoutZoneRow(rootNoteSlider, rootNoteLabel, 0);
-    layoutZoneRow(keyLoSlider, keyLoLabel, 1);
-    layoutZoneRow(keyHiSlider, keyHiLabel, 2);
-    layoutZoneRow(velLoSlider, velLoLabel, 3);
-    layoutZoneRow(velHiSlider, velHiLabel, 4);
-    layoutZoneRow(zonePanSlider, zonePanLabel, 5);
-    layoutZoneRow(zoneGainSlider, zoneGainLabel, 6);
+    // Right: Reverse and the round-robin pair, stacked.
+    auto rrColumn = zonePanel.removeFromRight(210);
+    zonePanel.removeFromRight(10);
+    rrColumn.removeFromTop(24);
+    reverseButton.setBounds(rrColumn.removeFromTop(28));
+    rrColumn.removeFromTop(14);
+    auto rrGroupRow = rrColumn.removeFromTop(28);
+    rrGroupLabel.setBounds(rrGroupRow.removeFromLeft(66));
+    rrGroupBox.setBounds(rrGroupRow.removeFromLeft(110));
+    rrColumn.removeFromTop(10);
+    auto rrOrderRow = rrColumn.removeFromTop(28);
+    rrOrderLabel.setBounds(rrOrderRow.removeFromLeft(66));
+    rrOrderBox.setBounds(rrOrderRow.removeFromLeft(110));
 
-    auto rrRow = zoneDetailColumn.withY(zoneDetailColumn.getY() + zoneRowHeight * 7).withHeight(zoneRowHeight);
-    rrGroupLabel.setBounds(rrRow.removeFromLeft(60));
-    rrGroupBox.setBounds(rrRow.removeFromLeft(90));
-    rrRow.removeFromLeft(10);
-    rrOrderLabel.setBounds(rrRow.removeFromLeft(30));
-    rrOrderBox.setBounds(rrRow.removeFromLeft(110));
+    // Middle: one vertical fader per zone property.
+    constexpr int numZoneFaders = 7;
+    const int zoneFaderWidth = zonePanel.getWidth() / numZoneFaders;
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, rootNoteSlider, rootNoteLabel, 0);
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, keyLoSlider, keyLoLabel, 1);
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, keyHiSlider, keyHiLabel, 2);
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, velLoSlider, velLoLabel, 3);
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, velHiSlider, velHiLabel, 4);
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, zonePanSlider, zonePanLabel, 5);
+    layoutVerticalSlider(zonePanel, zoneFaderWidth, zoneGainSlider, zoneGainLabel, 6);
 
     //==========================================================================
     // Second row: Envelope / Filter / Playback panels side by side.
@@ -831,12 +834,6 @@ void SampleForgeAudioProcessorEditor::resized()
     envelopeContent.removeFromTop(panelHeaderHeight);
     constexpr int numEnvelopeSliders = 5;
     int envelopeSliderWidth = envelopeContent.getWidth() / numEnvelopeSliders;
-    auto layoutVerticalSlider = [&](juce::Rectangle<int> content, int width, juce::Slider& s, juce::Label& l, int index)
-    {
-        auto column = content.withX(content.getX() + width * index).withWidth(width);
-        l.setBounds(column.removeFromTop(20));
-        s.setBounds(column);
-    };
     layoutVerticalSlider(envelopeContent, envelopeSliderWidth, attackSlider, attackLabel, 0);
     layoutVerticalSlider(envelopeContent, envelopeSliderWidth, decaySlider, decayLabel, 1);
     layoutVerticalSlider(envelopeContent, envelopeSliderWidth, sustainSlider, sustainLabel, 2);
@@ -857,24 +854,20 @@ void SampleForgeAudioProcessorEditor::resized()
     layoutVerticalSlider(filterContent, filterSliderWidth, resonanceSlider, resonanceLabel, 1);
     layoutVerticalSlider(filterContent, filterSliderWidth, filterEnvSlider, filterEnvLabel, 2);
 
-    // Playback: Loop mode + its Sync rate, stacked.
+    // Playback: Loop mode and its Sync rate stacked on the left, Stretch and
+    // Bend as vertical faders on the right.
     auto playbackContent = playbackPanelBounds.reduced(10, 4);
     playbackContent.removeFromTop(panelHeaderHeight);
-    auto loopRow = playbackContent.removeFromTop(28);
-    loopModeLabel.setBounds(loopRow.removeFromLeft(54));
-    loopModeBox.setBounds(loopRow.removeFromLeft(110));
-    playbackContent.removeFromTop(6);
-    auto syncRow = playbackContent.removeFromTop(28);
-    loopSyncLabel.setBounds(syncRow.removeFromLeft(54));
-    loopSyncBox.setBounds(syncRow.removeFromLeft(90));
+    auto playbackCombos = playbackContent.removeFromLeft(124);
+    playbackContent.removeFromLeft(6);
+    playbackCombos.removeFromTop(6);
+    loopModeLabel.setBounds(playbackCombos.removeFromTop(18));
+    loopModeBox.setBounds(playbackCombos.removeFromTop(28));
+    playbackCombos.removeFromTop(16);
+    loopSyncLabel.setBounds(playbackCombos.removeFromTop(18));
+    loopSyncBox.setBounds(playbackCombos.removeFromTop(28));
 
-    playbackContent.removeFromTop(10);
-    auto stretchRow = playbackContent.removeFromTop(28);
-    stretchLabel.setBounds(stretchRow.removeFromLeft(72));
-    stretchSlider.setBounds(stretchRow);
-
-    playbackContent.removeFromTop(6);
-    auto bendRow = playbackContent.removeFromTop(28);
-    bendLabel.setBounds(bendRow.removeFromLeft(72));
-    bendSlider.setBounds(bendRow);
+    const int playbackFaderWidth = playbackContent.getWidth() / 2;
+    layoutVerticalSlider(playbackContent, playbackFaderWidth, stretchSlider, stretchLabel, 0);
+    layoutVerticalSlider(playbackContent, playbackFaderWidth, bendSlider, bendLabel, 1);
 }
