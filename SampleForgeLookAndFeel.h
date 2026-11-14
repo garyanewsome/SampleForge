@@ -16,7 +16,7 @@ public:
     static juce::Colour getLineColour()             { return juce::Colour(0xff2a2c32); }
     static juce::Colour getAccentColour()           { return juce::Colour(0xfff2f5ff); } // glowing white
     static juce::Colour getTextColour()             { return juce::Colour(0xfff2f5ff); }
-    static juce::Colour getDimTextColour()          { return juce::Colour(0xff8b90a0); }
+    static juce::Colour getDimTextColour()          { return juce::Colour(0xffadb2c2); }
     static juce::Colour getWarningColour()          { return juce::Colour(0xffff7a7a); }
 
     static juce::Font uiFont(float height, bool bold = false)
