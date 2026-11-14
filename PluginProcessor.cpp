@@ -690,7 +690,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout SampleForgeAudioProcessor::c
         juce::ParameterID("FILTER_ENV_AMOUNT", 1), "Filter Env Amount", -4.0f, 4.0f, 0.0f));
 
     // 1.0 = bypass (unchanged resampling path). Powered by RubberBandStretcher;
-    // only applied for non-looping, non-reversed playback — see SampleForgeVoice.
+    // works with every loop mode and in reverse — see SampleForgeVoice.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("STRETCH", 1), "Stretch",
         juce::NormalisableRange<float>(0.25f, 4.0f, 0.001f, 0.4f), 1.0f));
