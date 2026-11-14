@@ -114,13 +114,14 @@ void WaveformDisplay::paint(juce::Graphics& g)
         g.fillRect(bounds.withLeft(endX));
 
     // Time ruler along the bottom: a tick every 5 %, a label every 10 %.
-    g.setColour(LAF::getDimTextColour().withAlpha(0.8f));
+    g.setColour(LAF::getTickColour().withAlpha(0.8f));
     for (int i = 0; i <= 20; ++i)
     {
         const float x = juce::jlimit(0.5f, bounds.getWidth() - 0.5f, bounds.getWidth() * (float) i / 20.0f);
         const bool major = (i % 2 == 0);
         g.fillRect(x - 0.5f, bounds.getBottom() - (major ? 8.0f : 4.0f), 1.0f, major ? 8.0f : 4.0f);
     }
+    g.setColour(LAF::getDimTextColour());
     g.setFont(LAF::monoFont(9.0f));
     for (int i = 1; i < 10; i += 1)
     {

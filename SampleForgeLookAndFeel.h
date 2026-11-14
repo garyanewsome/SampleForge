@@ -16,7 +16,8 @@ public:
     static juce::Colour getLineColour()             { return juce::Colour(0xff2a2c32); }
     static juce::Colour getAccentColour()           { return juce::Colour(0xfff2f5ff); } // glowing white
     static juce::Colour getTextColour()             { return juce::Colour(0xfff2f5ff); }
-    static juce::Colour getDimTextColour()          { return juce::Colour(0xffadb2c2); }
+    static juce::Colour getDimTextColour()          { return juce::Colour(0xffc4c9d6); } // grey text
+    static juce::Colour getTickColour()             { return juce::Colour(0xff8b90a0); } // scale ticks, a step dimmer than text
     static juce::Colour getWarningColour()          { return juce::Colour(0xffff7a7a); }
 
     static juce::Font uiFont(float height, bool bold = false)
@@ -235,7 +236,7 @@ public:
             const float ty = bottom - (bottom - top) * (float) i / (float) divisions;
             const bool major = stepped || (i % 5 == 0);
             const float len = major ? 10.0f : 5.0f;
-            g.setColour(getDimTextColour().withAlpha(major ? 0.75f : 0.38f));
+            g.setColour(getTickColour().withAlpha(major ? 0.75f : 0.38f));
             g.fillRect(cx - capW * 0.5f - 5.0f - len, ty - 0.5f, len, 1.0f);
             g.fillRect(cx + capW * 0.5f + 5.0f,       ty - 0.5f, len, 1.0f);
         }
