@@ -105,9 +105,58 @@ void pumpMessages(int ms)
 
 } // namespace
 
-int main()
+// --snapshot out.png : renders the editor offscreen with a few demo zones loaded.
+int snapshot(const juce::File& png)
+{
+    auto demo = [](const juce::String& name, double rate, int length, std::function<float(double, double)> fn) {
+        auto file = tempDir().getChildFile(name);
+        file.deleteFile();
+        juce::AudioBuffer<float> b(2, length);
+        for (int i = 0; i < length; ++i) { float v = fn(i / rate, (double) i / length); b.setSample(0, i, v); b.setSample(1, i, v); }
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::FileOutputStream> out(file.createOutputStream());
+        std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(out.get(), rate, 2, 24, {}, 0));
+        out.release();
+        w->writeFromAudioSampleBuffer(b, 0, length);
+        return file;
+    };
+    const double tau = juce::MathConstants<double>::twoPi;
+    auto pad = demo("Warm Pad C3.wav", 48000, 48000 * 3, [&](double t, double u) {
+        double env = std::sin(juce::MathConstants<double>::pi * u);
+        return (float) (0.45 * env * (std::sin(tau * 130.8 * t) + 0.6 * std::sin(tau * 196.0 * t) + 0.35 * std::sin(tau * 261.6 * t + 1.0 * std::sin(tau * 3.0 * t)))); });
+    auto pluck = demo("Pluck E2.wav", 48000, 48000 * 2, [&](double t, double) {
+        return (float) (0.8 * std::exp(-t * 3.0) * (std::sin(tau * 82.4 * t) + 0.5 * std::sin(tau * 164.8 * t) + 0.25 * std::sin(tau * 247.2 * t))); });
+    auto hit = demo("Snare Hit.wav", 44100, 44100, [&](double t, double) {
+        return (float) (0.9 * std::exp(-t * 14.0) * (0.6 * std::sin(tau * 190.0 * t) + 0.9 * ((std::fmod(t * 7919.0, 1.0)) - 0.5))); });
+
+    SampleForgeAudioProcessor proc;
+    proc.addZoneFromFile(pluck); proc.getZone(0)->keyLow = 28; proc.getZone(0)->keyHigh = 47; proc.getZone(0)->rootNote = 40; proc.getZone(0)->rrGroup = 1;
+    proc.addZoneFromFile(hit);   proc.getZone(1)->keyLow = 48; proc.getZone(1)->keyHigh = 59; proc.getZone(1)->rootNote = 54; proc.getZone(1)->velHigh = 90;
+    proc.addZoneFromFile(pad);   proc.getZone(2)->keyLow = 60; proc.getZone(2)->keyHigh = 83; proc.getZone(2)->rootNote = 60; proc.getZone(2)->sampleStart = 0.08f; proc.getZone(2)->sampleEnd = 0.86f;
+    proc.setSelectedZoneIndex(2);
+    setParam(proc, "SUSTAIN", 0.7f); setParam(proc, "RELEASE", 0.8f); setParam(proc, "FILTER_CUTOFF", 4200.0f);
+    setParam(proc, "FILTER_RESONANCE", 1.4f); setParam(proc, "FILTER_ENV_AMOUNT", 1.0f); setParam(proc, "STRETCH", 1.5f); setParam(proc, "LOOP_MODE", 1.0f);
+    proc.keyboardState.noteOn(1, 64, 0.8f);
+    proc.keyboardState.noteOn(1, 67, 0.8f);
+
+    std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
+    ed->setBounds(0, 0, 1280, 770);
+    pumpMessages(600);
+    auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
+    png.deleteFile();
+    juce::PNGImageFormat fmt;
+    std::unique_ptr<juce::FileOutputStream> out(png.createOutputStream());
+    fmt.writeImageToStream(img, *out);
+    std::cout << "wrote " << png.getFullPathName() << std::endl;
+    return 0;
+}
+
+int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI gui;
+
+    if (argc >= 3 && juce::String(argv[1]) == "--snapshot")
+        return snapshot(juce::File(argv[2]));
 
     {
         std::cout << "[1] Velocity layers never steal voices from sounding notes\n";

@@ -72,17 +72,18 @@ void WaveformDisplay::paint(juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
 
-    g.setColour(juce::Colours::black.withAlpha(0.35f));
+    g.setColour(juce::Colours::black);
     g.fillRect(bounds);
+    g.setColour(SampleForgeLookAndFeel::getLineColour());
+    g.drawRect(bounds, 1.0f);
 
     auto* zone = audioProcessor.getZone(audioProcessor.getSelectedZoneIndex());
 
     if (zone == nullptr || zone->thumbnail == nullptr || zone->thumbnail->getTotalLength() <= 0.0)
     {
-        g.setColour(juce::Colours::white.withAlpha(0.4f));
-        g.setFont(16.0f);
-        g.drawText(fileDragHover ? "Drop to add zone" : "Add a zone to get started (or drop a file here)",
-                   bounds, juce::Justification::centred);
+        SampleForgeLookAndFeel::drawGlowText(g, fileDragHover ? "Drop to add zone" : "Add a zone to get started (or drop a file here)",
+                   getLocalBounds(), juce::Justification::centred, SampleForgeLookAndFeel::uiFont(16.0f),
+                   SampleForgeLookAndFeel::getTextColour().withAlpha(0.6f), 0.8f);
 
         if (fileDragHover)
         {
@@ -92,6 +93,11 @@ void WaveformDisplay::paint(juce::Graphics& g)
         return;
     }
 
+    // Halo first (a slightly taller, fainter copy), then the crisp peaks.
+    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.14f));
+    zone->thumbnail->drawChannels(g, getLocalBounds().expanded(0, 5), 0.0, zone->thumbnail->getTotalLength(), 1.0f);
+    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.22f));
+    zone->thumbnail->drawChannels(g, getLocalBounds().expanded(0, 2), 0.0, zone->thumbnail->getTotalLength(), 1.0f);
     g.setColour(SampleForgeLookAndFeel::getAccentColour());
     zone->thumbnail->drawChannels(g, getLocalBounds(), 0.0, zone->thumbnail->getTotalLength(), 1.0f);
 
@@ -102,15 +108,18 @@ void WaveformDisplay::paint(juce::Graphics& g)
     float endX = endNorm * bounds.getWidth();
 
     // Dim the trimmed-out head/tail regions
-    g.setColour(juce::Colours::black.withAlpha(0.6f));
+    g.setColour(juce::Colours::black.withAlpha(0.72f));
     if (startX > 0.0f)
         g.fillRect(bounds.withWidth(startX));
     if (endX < bounds.getWidth())
         g.fillRect(bounds.withLeft(endX));
 
+    g.setColour(juce::Colours::white.withAlpha(0.2f));
+    g.drawLine(startX, 0.0f, startX, bounds.getHeight(), 6.0f);
+    g.drawLine(endX, 0.0f, endX, bounds.getHeight(), 6.0f);
     g.setColour(juce::Colours::white);
-    g.drawLine(startX, 0.0f, startX, bounds.getHeight(), 2.0f);
-    g.drawLine(endX, 0.0f, endX, bounds.getHeight(), 2.0f);
+    g.drawLine(startX, 0.0f, startX, bounds.getHeight(), 1.5f);
+    g.drawLine(endX, 0.0f, endX, bounds.getHeight(), 1.5f);
 
     juce::Path startHandle, endHandle;
     startHandle.addTriangle(startX - 6.0f, 0.0f, startX + 6.0f, 0.0f, startX, 10.0f);
@@ -548,6 +557,11 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
 
     addAndMakeVisible(midiKeyboard);
 
+    // The processor may already hold zones (reopening the window on a loaded
+    // session), so sync the list, file label and zone controls right away
+    // instead of waiting for the next change message.
+    changeListenerCallback(nullptr);
+
     setSize(1280, 770);
 }
 
@@ -601,7 +615,11 @@ int SampleForgeAudioProcessorEditor::getNumRows()
 void SampleForgeAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Graphics& g, int width, int height, bool rowIsSelected)
 {
     if (rowIsSelected)
-        g.fillAll(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.25f));
+    {
+        g.fillAll(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.10f));
+        g.setColour(SampleForgeLookAndFeel::getAccentColour());
+        g.fillRect(0, 0, 2, height);
+    }
 
     auto* zone = audioProcessor.getZone(rowNumber);
     if (zone == nullptr)
@@ -616,9 +634,11 @@ void SampleForgeAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Grap
                        + (zone->reverse.load() ? "  |  REV" : "")
                        + (zone->rrGroup.load() > 0 ? "  |  RR" + juce::String(zone->rrGroup.load()) : "");
 
-    g.setColour(zone->missing ? juce::Colour(0xffff6b6b) : juce::Colours::white);
-    g.setFont(13.0f);
-    g.drawText(text, 6, 0, width - 10, height, juce::Justification::centredLeft, true);
+    SampleForgeLookAndFeel::drawGlowText(g, text, juce::Rectangle<int>(8, 0, width - 12, height),
+                                         juce::Justification::centredLeft, SampleForgeLookAndFeel::monoFont(12.0f),
+                                         zone->missing ? SampleForgeLookAndFeel::getWarningColour()
+                                                       : SampleForgeLookAndFeel::getTextColour(),
+                                         rowIsSelected ? 0.8f : 0.3f);
 }
 
 void SampleForgeAudioProcessorEditor::listBoxItemClicked(int row, const juce::MouseEvent&)
@@ -659,16 +679,14 @@ void SampleForgeAudioProcessorEditor::paint(juce::Graphics& g)
 {
     g.fillAll(SampleForgeLookAndFeel::getWindowBackgroundColour());
 
-    juce::Rectangle<int> titleBar(0, 0, getWidth(), 44);
-    g.setColour(SampleForgeLookAndFeel::getPanelColour());
-    g.fillRect(titleBar);
-
-    g.setColour(SampleForgeLookAndFeel::getAccentColour());
-    g.fillRect(0, 42, getWidth(), 2);
-
-    g.setColour(SampleForgeLookAndFeel::getTextColour());
-    g.setFont(22.0f);
-    g.drawText("SampleForge", 20, 0, 400, 44, juce::Justification::centredLeft, true);
+    // Title: big, letter-spaced, glowing. A hairline with a soft glow underneath.
+    SampleForgeLookAndFeel::drawGlowText(g, "S A M P L E F O R G E", juce::Rectangle<int>(20, 0, 520, 42),
+                                         juce::Justification::centredLeft,
+                                         SampleForgeLookAndFeel::uiFont(22.0f, true));
+    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.10f));
+    g.fillRect(0, 41, getWidth(), 4);
+    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.8f));
+    g.fillRect(0, 42, getWidth(), 1);
 
     drawPanel(g, zonePanelBounds, "Zone");
     drawPanel(g, envelopePanelBounds, "Envelope");
@@ -681,17 +699,31 @@ void SampleForgeAudioProcessorEditor::drawPanel(juce::Graphics& g, juce::Rectang
     if (bounds.isEmpty())
         return;
 
-    auto panelColour = SampleForgeLookAndFeel::getPanelColour();
+    // Chamfered black panel with a hairline edge and a faint inner glow.
+    auto r = bounds.toFloat().reduced(0.5f);
+    const float ch = 7.0f;
+    juce::Path p;
+    p.startNewSubPath(r.getX() + ch, r.getY());
+    p.lineTo(r.getRight() - ch, r.getY());
+    p.lineTo(r.getRight(), r.getY() + ch);
+    p.lineTo(r.getRight(), r.getBottom() - ch);
+    p.lineTo(r.getRight() - ch, r.getBottom());
+    p.lineTo(r.getX() + ch, r.getBottom());
+    p.lineTo(r.getX(), r.getBottom() - ch);
+    p.lineTo(r.getX(), r.getY() + ch);
+    p.closeSubPath();
 
-    g.setColour(panelColour);
-    g.fillRoundedRectangle(bounds.toFloat(), 6.0f);
-    g.setColour(panelColour.brighter(0.35f));
-    g.drawRoundedRectangle(bounds.toFloat().reduced(0.5f), 6.0f, 1.0f);
+    g.setColour(SampleForgeLookAndFeel::getPanelColour());
+    g.fillPath(p);
+    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.07f));
+    g.strokePath(p, juce::PathStrokeType(4.0f));
+    g.setColour(SampleForgeLookAndFeel::getLineColour().brighter(0.35f));
+    g.strokePath(p, juce::PathStrokeType(1.0f));
 
-    g.setColour(SampleForgeLookAndFeel::getTextColour().withAlpha(0.6f));
-    g.setFont(juce::Font(juce::FontOptions(13.0f).withStyle("Bold")));
-    g.drawText(title, bounds.withHeight(20).withY(bounds.getY() + 2).reduced(10, 0),
-               juce::Justification::centredLeft);
+    SampleForgeLookAndFeel::drawGlowText(g, title.toUpperCase(), bounds.withHeight(20).withY(bounds.getY() + 3).reduced(12, 0),
+                                         juce::Justification::centredLeft,
+                                         SampleForgeLookAndFeel::uiFont(11.0f, true),
+                                         SampleForgeLookAndFeel::getDimTextColour().brighter(0.6f), 0.7f);
 }
 
 void SampleForgeAudioProcessorEditor::resized()
