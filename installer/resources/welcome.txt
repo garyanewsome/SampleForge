@@ -1,0 +1,9 @@
+Welcome to the @PRODUCT@ installer.
+
+@PRODUCT@ is @DESCRIPTION@. This installer puts three things on your Mac:
+
+  - the VST3 plugin
+  - the Audio Unit (AU) plugin, for Logic, GarageBand and others
+  - the standalone @PRODUCT@ app, in your Applications folder
+
+Click Continue, then Install. You will be asked for your Mac password.

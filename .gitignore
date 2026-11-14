@@ -28,3 +28,4 @@
 *.app
 /cmake-build-asan/
 /cmake-build/
+/dist/

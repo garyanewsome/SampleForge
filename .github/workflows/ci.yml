@@ -79,8 +79,24 @@ jobs:
           cd build/SampleForge_artefacts/Release
           zip -r "${GITHUB_WORKSPACE}/SampleForge-macOS-universal.zip" VST3 AU Standalone
 
+      - name: Build installer disk image
+        # Double-click installer + uninstaller for non-technical users.
+        # Unsigned unless Developer ID secrets are added (see installer/).
+        env:
+          DESCRIPTION: a multisampler with time-stretch, looping, round-robin and an arpeggiator
+        run: ./installer/build_installer.sh build/SampleForge_artefacts/Release
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: SampleForge-macOS-universal.zip
+          files: |
+            SampleForge-macOS-universal.zip
+            dist/SampleForge-*-macOS.dmg
           generate_release_notes: true
+          body: |
+            **Easiest install:** download the `.dmg`, open it, and double-click *Install SampleForge.pkg*.
+            The installer is not yet signed with an Apple developer certificate, so macOS will ask
+            you to approve it once - the steps are in *READ ME FIRST.txt* inside the disk image.
+            The `.zip` is the raw VST3 / AU / Standalone bundles for manual installs.
+
+            Requires macOS 13 (Ventura) or newer. Universal: Intel and Apple Silicon.

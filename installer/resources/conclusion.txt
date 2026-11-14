@@ -1,0 +1,9 @@
+@PRODUCT@ is installed.
+
+Please quit and reopen your music software, then look for "@PRODUCT@" in your
+instrument list (Gary A. Newsome / @PRODUCT@).
+
+If your software does not show it, run its plugin rescan. Logic Pro does this
+automatically on launch; in other hosts it is usually in the plugin manager.
+
+To remove @PRODUCT@ later, use "Uninstall @PRODUCT@" from the same disk image.

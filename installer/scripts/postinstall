@@ -1,0 +1,4 @@
+#!/bin/bash
+# Make hosts re-scan Audio Units so the plugin shows up without a reboot.
+/usr/bin/killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+exit 0
