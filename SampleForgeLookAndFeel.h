@@ -282,13 +282,14 @@ public:
         const auto white = getTextColour();
         g.setColour(juce::Colours::black);
         g.fillRect(r);
-        if (highlighted || down)
+        const bool lit = b.getToggleState();   // a selected tab
+        if (lit || highlighted || down)
         {
-            g.setColour(white.withAlpha(down ? 0.20f : 0.08f));
+            g.setColour(white.withAlpha(lit ? 0.16f : (down ? 0.20f : 0.08f)));
             g.fillRect(r);
         }
-        drawBrackets(g, r, juce::jmin(7.0f, r.getHeight() * 0.4f), 1.2f, white.withAlpha(b.isEnabled() ? 1.0f : 0.4f),
-                     highlighted || down ? 0.55f : 0.30f);
+        drawBrackets(g, r, juce::jmin(7.0f, r.getHeight() * 0.4f), lit ? 1.6f : 1.2f, white.withAlpha(b.isEnabled() ? 1.0f : 0.4f),
+                     lit ? 0.7f : (highlighted || down ? 0.55f : 0.30f));
     }
 
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool) override

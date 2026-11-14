@@ -19,6 +19,8 @@ A polyphonic multisampled sampler VST built in C++ using the [JUCE Framework](ht
 - **Polyphonic ADSR**: Full envelope control (Attack, Decay, Sustain, Release) across all voices and zones, re-evaluated every block so trim/envelope tweaks are heard immediately.
 - **Click-free playback**: One-shots fade out over their last 2 ms, and forward loops crossfade (3 ms) across the wrap point.
 - **Missing-sample recovery**: A sample that can't be found is kept as a silent `[MISSING]` zone with all its settings. Presets remember each sample's location relative to the preset file and look for it beside the preset when it has moved; dropping a file of the same name onto the plugin relinks the zone.
+- **Arpeggiator**: A MIDI-level arp between your keys and the sampler. Patterns: Up, Down, Up/Down, Down/Up, Random and As Played; rates 1/4 to 1/32 including triplets; 1-4 octaves; adjustable gate and swing; and Latch. It follows the host tempo and, when the host is playing, starts on the grid so it stays in time with the song. The Arp page shows the pattern as pitch bars with the current step lit. With the arp off, MIDI passes straight through, and a key held while you switch the arp on still releases cleanly.
+- **Pages**: The lower half switches between Zone, Sound (envelope, filter, playback) and Arp pages; the choice is remembered with the session.
 - **Session Persistence**: Every zone's file path, key/velocity range, root note, trim, reverse/pan/gain/RR-group setting, plus all envelope/loop/filter settings, are saved with the plugin state and restored on reload.
 - **Preset Save/Load**: The entire instrument (every zone plus all global settings) can be saved to or loaded from a standalone `.sfpreset` file, independent of any DAW project.
 - **Cached Waveform Display**: Each zone builds its own `juce::AudioThumbnail` once on load, so the waveform view never rescans sample data on zone switches or window resizes, and stays responsive on long material.
@@ -29,7 +31,8 @@ A polyphonic multisampled sampler VST built in C++ using the [JUCE Framework](ht
 * `CMakeLists.txt` - Project structure configuration using `FetchContent`. Builds a universal (Intel + Apple Silicon) binary for macOS 13 (Ventura) or newer.
 * `PluginProcessor.h/cpp` - The audio core logic. Defines `SampleForgeSound` (one zone: buffer, key/velocity range, root note, trim, reverse/pan/gain/RR-group, cached `AudioThumbnail`), `SampleForgeVoice` (per-voice filter, tempo-synced looping, and RubberBandStretcher-backed time-stretch), `SampleForgeSynthesiser` (round-robin note-on routing), zone loading, and state/preset management.
 * `PluginEditor.h/cpp` - The visual interface, including the zone list, per-zone controls, the draggable/drop-target `WaveformDisplay` component, and parameter binding.
-* `SampleForgeLookAndFeel.h` - The flat, single-accent-color visual theme applied across all controls.
+* `Arpeggiator.h` - The arpeggiator engine (header-only, allocation-free, unit tested on raw MIDI buffers).
+* `SampleForgeLookAndFeel.h` - The black-and-white HUD theme: hairline strokes, corner brackets, spaced mono labels, ring-and-crosshair thumbs.
 
 ## Licensing
 

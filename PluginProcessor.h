@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 #include <rubberband/RubberBandStretcher.h>
+#include "Arpeggiator.h"
 
 //==============================================================================
 // Holds the decoded sample data plus the key/velocity range and per-zone trim
@@ -294,6 +295,9 @@ public:
     // Tracks on-screen piano clicks
     juce::MidiKeyboardState keyboardState;
 
+    // Exposes the arpeggiator's display state to the editor.
+    const arp::Arpeggiator& getArpeggiator() const { return arpeggiator; }
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
@@ -323,6 +327,17 @@ private:
     juce::AudioThumbnailCache thumbnailCache { 8 };
 
     SampleForgeSynthesiser synth;
+
+    // Sits between the incoming MIDI (host + on-screen keyboard) and the synth.
+    arp::Arpeggiator arpeggiator;
+    juce::MidiBuffer arpOutput;
+    std::atomic<float>* arpOn = nullptr;
+    std::atomic<float>* arpPattern = nullptr;
+    std::atomic<float>* arpRate = nullptr;
+    std::atomic<float>* arpOctaves = nullptr;
+    std::atomic<float>* arpGate = nullptr;
+    std::atomic<float>* arpSwing = nullptr;
+    std::atomic<float>* arpLatch = nullptr;
 
     int selectedZoneIndex = -1;
 

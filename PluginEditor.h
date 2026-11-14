@@ -48,6 +48,27 @@ private:
 };
 
 //==============================================================================
+// Shows the arpeggiator's current pattern as a row of pitch bars, with the
+// step that is sounding lit up. Reads the arp's atomics from a 30 Hz timer.
+class ArpDisplay : public juce::Component, private juce::Timer
+{
+public:
+    explicit ArpDisplay(SampleForgeAudioProcessor& p);
+    ~ArpDisplay() override;
+    void paint(juce::Graphics&) override;
+
+private:
+    void timerCallback() override;
+
+    SampleForgeAudioProcessor& audioProcessor;
+    int lastLength = -2, lastIndex = -2;
+    bool lastOn = false;
+    float lastGate = -1.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ArpDisplay)
+};
+
+//==============================================================================
 class SampleForgeAudioProcessorEditor  : public juce::AudioProcessorEditor,
                                           private juce::ChangeListener,
                                           private juce::ListBoxModel,
@@ -144,8 +165,26 @@ private:
 
     std::unique_ptr<juce::FileChooser> fileChooser;
 
+    // Page switcher for the lower half: Zone / Sound / Arp. The chosen page is
+    // kept in the plugin state (editors are destroyed when the window closes).
+    juce::TextButton tabZone, tabSound, tabArp;
+    int currentPage = 0;
+    std::vector<juce::Component*> zonePage, soundPage, arpPage;
+    void setPage(int page);
+
+    // Arpeggiator page.
+    juce::ToggleButton arpOnButton, arpLatchButton;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> arpOnAtt, arpLatchAtt;
+    juce::ComboBox arpPatternBox, arpRateBox;
+    juce::Label arpPatternLabel, arpRateLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> arpPatternAtt, arpRateAtt;
+    juce::Slider arpOctavesSlider, arpGateSlider, arpSwingSlider;
+    juce::Label arpOctavesLabel, arpGateLabel, arpSwingLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> arpOctavesAtt, arpGateAtt, arpSwingAtt;
+    ArpDisplay arpDisplay;
+
     // Cached by resized(), drawn by paint() and drawPanel().
-    juce::Rectangle<int> zonePanelBounds, envelopePanelBounds, filterPanelBounds, playbackPanelBounds;
+    juce::Rectangle<int> zonePanelBounds, envelopePanelBounds, filterPanelBounds, playbackPanelBounds, arpPanelBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SampleForgeAudioProcessorEditor)
 };

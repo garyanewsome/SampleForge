@@ -233,8 +233,102 @@ void WaveformDisplay::filesDropped(const juce::StringArray& files, int, int)
 }
 
 //==============================================================================
+ArpDisplay::ArpDisplay(SampleForgeAudioProcessor& p) : audioProcessor(p)
+{
+    startTimerHz(30);
+}
+
+ArpDisplay::~ArpDisplay()
+{
+    stopTimer();
+}
+
+void ArpDisplay::timerCallback()
+{
+    const auto& a = audioProcessor.getArpeggiator();
+    const int length = a.displayLength.load(), index = a.displayIndex.load();
+    const bool on = audioProcessor.apvts.getRawParameterValue("ARP_ON")->load() > 0.5f;
+    const float gate = audioProcessor.apvts.getRawParameterValue("ARP_GATE")->load();
+    if (length != lastLength || index != lastIndex || on != lastOn || gate != lastGate)
+    {
+        lastLength = length; lastIndex = index; lastOn = on; lastGate = gate;
+        repaint();
+    }
+}
+
+void ArpDisplay::paint(juce::Graphics& g)
+{
+    using LAF = SampleForgeLookAndFeel;
+    auto bounds = getLocalBounds().toFloat();
+    g.setColour(juce::Colours::black);
+    g.fillRect(bounds);
+
+    // Graticule, as on the waveform.
+    g.setColour(LAF::getAccentColour().withAlpha(0.08f));
+    for (int i = 1; i < 4; ++i)
+        g.fillRect(0.0f, bounds.getHeight() * (float) i / 4.0f - 0.5f, bounds.getWidth(), 1.0f);
+
+    const auto& a = audioProcessor.getArpeggiator();
+    const int length = a.displayLength.load();
+    const int active = a.displayIndex.load();
+    const bool on = audioProcessor.apvts.getRawParameterValue("ARP_ON")->load() > 0.5f;
+
+    LAF::drawBrackets(g, bounds.reduced(1.5f), 14.0f, 1.5f, LAF::getAccentColour(), 0.0f);
+
+    if (!on || length == 0)
+    {
+        LAF::drawGlowText(g, !on ? "ARP OFF" : "HOLD KEYS TO ARPEGGIATE", getLocalBounds(), juce::Justification::centred,
+                          LAF::hudFont(12.0f, 0.25f), LAF::getTextColour().withAlpha(0.6f), 0.3f);
+        return;
+    }
+
+    int lowest = 127, highest = 0;
+    for (int i = 0; i < length; ++i)
+    {
+        const int n = a.displayNotes[i].load();
+        lowest = juce::jmin(lowest, n);
+        highest = juce::jmax(highest, n);
+    }
+
+    auto area = bounds.reduced(22.0f, 20.0f);
+    area.removeFromBottom(16.0f); // note names
+    const float colW = area.getWidth() / (float) length;
+    const float barW = juce::jlimit(3.0f, 14.0f, colW * 0.32f);
+
+    for (int i = 0; i < length; ++i)
+    {
+        const int note = a.displayNotes[i].load();
+        const float norm = highest > lowest ? (float) (note - lowest) / (float) (highest - lowest) : 0.5f;
+        const float h = area.getHeight() * (0.18f + 0.82f * norm);
+        const float cx = area.getX() + colW * ((float) i + 0.5f);
+        const bool lit = (i == active);
+        const auto colour = LAF::getAccentColour().withAlpha(lit ? 1.0f : 0.45f);
+
+        if (lit)
+        {
+            g.setColour(LAF::getAccentColour().withAlpha(0.18f));
+            g.fillRect(cx - barW * 0.5f - 4.0f, area.getBottom() - h - 4.0f, barW + 8.0f, h + 4.0f);
+        }
+        g.setColour(colour);
+        g.fillRect(cx - barW * 0.5f, area.getBottom() - h, barW, h);
+        g.fillRect(cx - barW * 0.5f - 3.0f, area.getBottom() - h - 1.0f, barW + 6.0f, 1.5f);   // cap
+
+        if (colW >= 26.0f)
+        {
+            g.setColour(lit ? LAF::getTextColour() : LAF::getDimTextColour());
+            g.setFont(LAF::monoFont(9.0f));
+            g.drawText(juce::MidiMessage::getMidiNoteName(note, true, true, 3),
+                       juce::Rectangle<float>(cx - colW * 0.5f, area.getBottom() + 3.0f, colW, 12.0f), juce::Justification::centred, false);
+        }
+    }
+
+    g.setColour(LAF::getAccentColour().withAlpha(0.5f));
+    g.fillRect(area.getX(), area.getBottom(), area.getWidth(), 1.0f);
+}
+
+//==============================================================================
 SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudioProcessor& p)
-    : AudioProcessorEditor(&p), audioProcessor(p), waveformDisplay(p),
+    : AudioProcessorEditor(&p), audioProcessor(p), waveformDisplay(p), arpDisplay(p),
       midiKeyboard(p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     setLookAndFeel(&lookAndFeel);
@@ -569,6 +663,62 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     };
     stretchSlider.updateText();
 
+    // Arpeggiator page.
+    arpOnButton.setButtonText("Arp On");
+    arpOnAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(audioProcessor.apvts, "ARP_ON", arpOnButton);
+    addAndMakeVisible(arpOnButton);
+    arpLatchButton.setButtonText("Latch");
+    arpLatchAtt = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(audioProcessor.apvts, "ARP_LATCH", arpLatchButton);
+    addAndMakeVisible(arpLatchButton);
+
+    arpPatternBox.addItemList(arp::patternNames(), 1);
+    arpPatternAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(audioProcessor.apvts, "ARP_PATTERN", arpPatternBox);
+    arpPatternLabel.setText("Pattern", juce::dontSendNotification);
+    arpRateBox.addItemList(arp::rateNames(), 1);
+    arpRateAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(audioProcessor.apvts, "ARP_RATE", arpRateBox);
+    arpRateLabel.setText("Rate", juce::dontSendNotification);
+    for (auto* c : std::initializer_list<juce::Component*> { &arpPatternBox, &arpRateBox, &arpPatternLabel, &arpRateLabel })
+        addAndMakeVisible(c);
+
+    setupSlider(arpOctavesSlider, arpOctavesLabel, "Octaves", arpOctavesAtt, "ARP_OCTAVES");
+    arpOctavesSlider.setNumDecimalPlacesToDisplay(0);
+    setupSlider(arpGateSlider, arpGateLabel, "Gate", arpGateAtt, "ARP_GATE");
+    arpGateSlider.textFromValueFunction = fracToPercent;
+    arpGateSlider.valueFromTextFunction = [](const juce::String& t) { return t.getDoubleValue() / 100.0; };
+    arpGateSlider.updateText();
+    setupSlider(arpSwingSlider, arpSwingLabel, "Swing", arpSwingAtt, "ARP_SWING");
+    arpSwingSlider.textFromValueFunction = fracToPercent;
+    arpSwingSlider.valueFromTextFunction = [](const juce::String& t) { return t.getDoubleValue() / 100.0; };
+    arpSwingSlider.updateText();
+    addAndMakeVisible(arpDisplay);
+
+    // Tabs and pages.
+    auto setupTab = [this](juce::TextButton& b, const juce::String& text, int page)
+    {
+        b.setButtonText(text);
+        b.setClickingTogglesState(true);
+        b.setRadioGroupId(7001);
+        b.onClick = [this, page] { setPage(page); };
+        addAndMakeVisible(b);
+    };
+    setupTab(tabZone, "Zone", 0);
+    setupTab(tabSound, "Sound", 1);
+    setupTab(tabArp, "Arp", 2);
+
+    zonePage = { &zoneListBox, &removeZoneButton, &reverseButton,
+                 &rootNoteSlider, &keyLoSlider, &keyHiSlider, &velLoSlider, &velHiSlider, &zonePanSlider, &zoneGainSlider,
+                 &rootNoteLabel, &keyLoLabel, &keyHiLabel, &velLoLabel, &velHiLabel, &zonePanLabel, &zoneGainLabel,
+                 &rrGroupBox, &rrGroupLabel, &rrOrderBox, &rrOrderLabel };
+    soundPage = { &attackSlider, &decaySlider, &sustainSlider, &releaseSlider, &gainSlider,
+                  &attackLabel, &decayLabel, &sustainLabel, &releaseLabel, &gainLabel,
+                  &filterTypeBox, &filterTypeLabel, &cutoffSlider, &resonanceSlider, &filterEnvSlider,
+                  &cutoffLabel, &resonanceLabel, &filterEnvLabel,
+                  &loopModeBox, &loopModeLabel, &loopSyncBox, &loopSyncLabel,
+                  &stretchSlider, &stretchLabel, &bendSlider, &bendLabel };
+    arpPage = { &arpOnButton, &arpLatchButton, &arpPatternBox, &arpRateBox, &arpPatternLabel, &arpRateLabel,
+                &arpOctavesSlider, &arpGateSlider, &arpSwingSlider, &arpOctavesLabel, &arpGateLabel, &arpSwingLabel,
+                &arpDisplay };
+
     addAndMakeVisible(midiKeyboard);
 
     // The processor may already hold zones (reopening the window on a loaded
@@ -576,7 +726,24 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     // instead of waiting for the next change message.
     changeListenerCallback(nullptr);
 
-    setSize(1280, 770);
+    setPage(juce::jlimit(0, 2, static_cast<int>(audioProcessor.apvts.state.getProperty("uiPage", 0))));
+
+    setSize(1280, 690);
+}
+
+void SampleForgeAudioProcessorEditor::setPage(int page)
+{
+    currentPage = page;
+    audioProcessor.apvts.state.setProperty("uiPage", page, nullptr);
+
+    tabZone.setToggleState(page == 0, juce::dontSendNotification);
+    tabSound.setToggleState(page == 1, juce::dontSendNotification);
+    tabArp.setToggleState(page == 2, juce::dontSendNotification);
+
+    for (auto* c : zonePage)  c->setVisible(page == 0);
+    for (auto* c : soundPage) c->setVisible(page == 1);
+    for (auto* c : arpPage)   c->setVisible(page == 2);
+    repaint();
 }
 
 bool SampleForgeAudioProcessorEditor::isInterestedInFileDrag(const juce::StringArray& files)
@@ -720,10 +887,16 @@ void SampleForgeAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRect(10, 39, 1, 6);
     g.fillRect(getWidth() - 11, 39, 1, 6);
 
-    drawPanel(g, zonePanelBounds, "Zone");
-    drawPanel(g, envelopePanelBounds, "Envelope");
-    drawPanel(g, filterPanelBounds, "Filter");
-    drawPanel(g, playbackPanelBounds, "Playback");
+    if (currentPage == 0)
+        drawPanel(g, zonePanelBounds, "Zone");
+    else if (currentPage == 1)
+    {
+        drawPanel(g, envelopePanelBounds, "Envelope");
+        drawPanel(g, filterPanelBounds, "Filter");
+        drawPanel(g, playbackPanelBounds, "Playback");
+    }
+    else
+        drawPanel(g, arpPanelBounds, "Arpeggiator");
 }
 
 void SampleForgeAudioProcessorEditor::drawPanel(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::String& title)
@@ -754,6 +927,8 @@ void SampleForgeAudioProcessorEditor::resized()
 {
     constexpr int panelHeaderHeight = 22;
     constexpr int panelGap = 10;
+    constexpr int pageHeight = 236;
+    constexpr int tabHeight = 28;
 
     auto area = getLocalBounds();
 
@@ -761,21 +936,26 @@ void SampleForgeAudioProcessorEditor::resized()
 
     area.removeFromTop(44); // reserve room for the title drawn in paint()
 
-    // Just file/session actions — everything else now lives in its own panel
-    // below, next to the controls it actually affects.
     auto topBar = area.removeFromTop(36);
     loadButton.setBounds(topBar.removeFromLeft(140).reduced(4));
     savePresetButton.setBounds(topBar.removeFromLeft(120).reduced(4));
     loadPresetButton.setBounds(topBar.removeFromLeft(120).reduced(4));
     fileNameLabel.setBounds(topBar.reduced(4));
 
-    waveformDisplay.setBounds(area.removeFromTop(160).reduced(10, 6));
-
+    // Bottom up: the page, a row of tabs above it, and the waveform takes the rest.
     area.reduce(10, 6);
+    auto pageBounds = area.removeFromBottom(pageHeight);
+    area.removeFromBottom(6);
+    auto tabBar = area.removeFromBottom(tabHeight);
+    area.removeFromBottom(8);
+    waveformDisplay.setBounds(area);
 
-    //==========================================================================
-    // Zone panel: zone list + per-zone controls, including RR Group right
-    // next to RR Order since the two only make sense together.
+    tabZone.setBounds(tabBar.removeFromLeft(120));
+    tabBar.removeFromLeft(8);
+    tabSound.setBounds(tabBar.removeFromLeft(120));
+    tabBar.removeFromLeft(8);
+    tabArp.setBounds(tabBar.removeFromLeft(120));
+
     auto layoutVerticalSlider = [&](juce::Rectangle<int> content, int width, juce::Slider& sl, juce::Label& l, int index)
     {
         auto column = content.withX(content.getX() + width * index).withWidth(width);
@@ -783,19 +963,19 @@ void SampleForgeAudioProcessorEditor::resized()
         sl.setBounds(column);
     };
 
-    zonePanelBounds = area.removeFromTop(224);
-    area.removeFromTop(6); // breathing room between the brackets of the two rows
+    //==========================================================================
+    // Zone page: zone list + one vertical fader per zone property, with
+    // Reverse and the round-robin pair in a column on the right.
+    zonePanelBounds = pageBounds;
     auto zonePanel = zonePanelBounds.reduced(10, 4);
     zonePanel.removeFromTop(panelHeaderHeight);
 
-    // Left: the zone list with its Remove button underneath.
     auto zoneListArea = zonePanel.removeFromLeft(360);
     removeZoneButton.setBounds(zoneListArea.removeFromBottom(26));
     zoneListArea.removeFromBottom(4);
     zoneListBox.setBounds(zoneListArea);
     zonePanel.removeFromLeft(14);
 
-    // Right: Reverse and the round-robin pair, stacked.
     auto rrColumn = zonePanel.removeFromRight(210);
     zonePanel.removeFromRight(10);
     rrColumn.removeFromTop(24);
@@ -809,7 +989,6 @@ void SampleForgeAudioProcessorEditor::resized()
     rrOrderLabel.setBounds(rrOrderRow.removeFromLeft(66));
     rrOrderBox.setBounds(rrOrderRow.removeFromLeft(110));
 
-    // Middle: one vertical fader per zone property.
     constexpr int numZoneFaders = 7;
     const int zoneFaderWidth = zonePanel.getWidth() / numZoneFaders;
     layoutVerticalSlider(zonePanel, zoneFaderWidth, rootNoteSlider, rootNoteLabel, 0);
@@ -821,15 +1000,14 @@ void SampleForgeAudioProcessorEditor::resized()
     layoutVerticalSlider(zonePanel, zoneFaderWidth, zoneGainSlider, zoneGainLabel, 6);
 
     //==========================================================================
-    // Second row: Envelope / Filter / Playback panels side by side.
-    auto secondRow = area;
-    envelopePanelBounds = secondRow.removeFromLeft(560);
-    secondRow.removeFromLeft(panelGap);
-    filterPanelBounds = secondRow.removeFromLeft(380);
-    secondRow.removeFromLeft(panelGap);
-    playbackPanelBounds = secondRow;
+    // Sound page: Envelope / Filter / Playback panels side by side.
+    auto soundRow = pageBounds;
+    envelopePanelBounds = soundRow.removeFromLeft(560);
+    soundRow.removeFromLeft(panelGap);
+    filterPanelBounds = soundRow.removeFromLeft(380);
+    soundRow.removeFromLeft(panelGap);
+    playbackPanelBounds = soundRow;
 
-    // Envelope: Attack/Decay/Sustain/Release/Gain, all vertical sliders.
     auto envelopeContent = envelopePanelBounds.reduced(10, 4);
     envelopeContent.removeFromTop(panelHeaderHeight);
     constexpr int numEnvelopeSliders = 5;
@@ -840,7 +1018,6 @@ void SampleForgeAudioProcessorEditor::resized()
     layoutVerticalSlider(envelopeContent, envelopeSliderWidth, releaseSlider, releaseLabel, 3);
     layoutVerticalSlider(envelopeContent, envelopeSliderWidth, gainSlider, gainLabel, 4);
 
-    // Filter: the type selector sits directly above the sliders it governs.
     auto filterContent = filterPanelBounds.reduced(10, 4);
     filterContent.removeFromTop(panelHeaderHeight);
     auto filterTypeRow = filterContent.removeFromTop(26);
@@ -854,8 +1031,6 @@ void SampleForgeAudioProcessorEditor::resized()
     layoutVerticalSlider(filterContent, filterSliderWidth, resonanceSlider, resonanceLabel, 1);
     layoutVerticalSlider(filterContent, filterSliderWidth, filterEnvSlider, filterEnvLabel, 2);
 
-    // Playback: Loop mode and its Sync rate stacked on the left, Stretch and
-    // Bend as vertical faders on the right.
     auto playbackContent = playbackPanelBounds.reduced(10, 4);
     playbackContent.removeFromTop(panelHeaderHeight);
     auto playbackCombos = playbackContent.removeFromLeft(124);
@@ -870,4 +1045,31 @@ void SampleForgeAudioProcessorEditor::resized()
     const int playbackFaderWidth = playbackContent.getWidth() / 2;
     layoutVerticalSlider(playbackContent, playbackFaderWidth, stretchSlider, stretchLabel, 0);
     layoutVerticalSlider(playbackContent, playbackFaderWidth, bendSlider, bendLabel, 1);
+
+    //==========================================================================
+    // Arp page: switches and menus, three faders, and the live pattern display.
+    arpPanelBounds = pageBounds;
+    auto arpContent = arpPanelBounds.reduced(10, 4);
+    arpContent.removeFromTop(panelHeaderHeight);
+
+    auto arpLeft = arpContent.removeFromLeft(220);
+    arpLeft.removeFromTop(6);
+    arpOnButton.setBounds(arpLeft.removeFromTop(28));
+    arpLeft.removeFromTop(4);
+    arpLatchButton.setBounds(arpLeft.removeFromTop(28));
+    arpLeft.removeFromTop(12);
+    arpPatternLabel.setBounds(arpLeft.removeFromTop(16));
+    arpPatternBox.setBounds(arpLeft.removeFromTop(28).removeFromLeft(170));
+    arpLeft.removeFromTop(10);
+    arpRateLabel.setBounds(arpLeft.removeFromTop(16));
+    arpRateBox.setBounds(arpLeft.removeFromTop(28).removeFromLeft(170));
+
+    arpContent.removeFromLeft(10);
+    auto arpFaders = arpContent.removeFromLeft(3 * 96);
+    layoutVerticalSlider(arpFaders, 96, arpOctavesSlider, arpOctavesLabel, 0);
+    layoutVerticalSlider(arpFaders, 96, arpGateSlider, arpGateLabel, 1);
+    layoutVerticalSlider(arpFaders, 96, arpSwingSlider, arpSwingLabel, 2);
+
+    arpContent.removeFromLeft(14);
+    arpDisplay.setBounds(arpContent.withTrimmedTop(4));
 }

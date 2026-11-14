@@ -631,6 +631,14 @@ SampleForgeAudioProcessor::SampleForgeAudioProcessor()
 
     synth.rrOrderParam = apvts.getRawParameterValue("RR_ORDER");
 
+    arpOn = apvts.getRawParameterValue("ARP_ON");
+    arpPattern = apvts.getRawParameterValue("ARP_PATTERN");
+    arpRate = apvts.getRawParameterValue("ARP_RATE");
+    arpOctaves = apvts.getRawParameterValue("ARP_OCTAVES");
+    arpGate = apvts.getRawParameterValue("ARP_GATE");
+    arpSwing = apvts.getRawParameterValue("ARP_SWING");
+    arpLatch = apvts.getRawParameterValue("ARP_LATCH");
+
     for (int i = 0; i < 16; ++i)
         synth.addVoice(new SampleForgeVoice(voiceParams));
 }
@@ -699,6 +707,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout SampleForgeAudioProcessor::c
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("BEND_RANGE", 1), "Bend Range",
         juce::NormalisableRange<float>(0.0f, 12.0f, 1.0f), 2.0f));
+
+    // Arpeggiator (see Arpeggiator.h). Indices must match arp::Pattern / rateNames().
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("ARP_ON", 1), "Arp", juce::StringArray { "Off", "On" }, 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("ARP_PATTERN", 1), "Arp Pattern", arp::patternNames(), 0));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("ARP_RATE", 1), "Arp Rate", arp::rateNames(), 3));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID("ARP_OCTAVES", 1), "Arp Octaves", 1, 4, 1));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("ARP_GATE", 1), "Arp Gate", juce::NormalisableRange<float>(0.05f, 1.0f, 0.01f), 0.6f));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("ARP_SWING", 1), "Arp Swing", juce::NormalisableRange<float>(0.0f, 1.0f, 0.01f), 0.0f));
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("ARP_LATCH", 1), "Arp Latch", juce::StringArray { "Off", "On" }, 0));
 
     return { params.begin(), params.end() };
 }
@@ -878,6 +902,9 @@ void SampleForgeAudioProcessor::changeProgramName(int /*index*/, const juce::Str
 //==============================================================================
 void SampleForgeAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    arpeggiator.reset();
+    arpOutput.ensureSize(8192);
+
     synth.setCurrentPlaybackSampleRate(sampleRate);
 
     // Bus layout only ever allows mono or stereo, so 2 channels covers both.
@@ -917,6 +944,33 @@ void SampleForgeAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
 
     // Merges incoming clicks from the UI keyboard into the buffer stream
     keyboardState.processNextMidiBuffer(midiMessages, 0, buffer.getNumSamples(), true);
+
+    // Arpeggiator: turns held notes into a stepped stream (or passes MIDI
+    // straight through when it is off).
+    {
+        arp::Settings st;
+        st.on = arpOn->load() > 0.5f;
+        st.pattern = static_cast<int>(arpPattern->load());
+        st.rate = static_cast<int>(arpRate->load());
+        st.octaves = static_cast<int>(arpOctaves->load());
+        st.gate = arpGate->load();
+        st.swing = arpSwing->load();
+        st.latch = arpLatch->load() > 0.5f;
+
+        bool hostPlaying = false;
+        double hostPpq = -1.0;
+        if (auto* playHead = getPlayHead())
+            if (auto position = playHead->getPosition())
+            {
+                hostPlaying = position->getIsPlaying();
+                if (auto ppq = position->getPpqPosition())
+                    hostPpq = *ppq;
+            }
+
+        arpeggiator.process(midiMessages, arpOutput, buffer.getNumSamples(), getSampleRate(), st,
+                            static_cast<double>(currentBpm.load()), hostPlaying, hostPpq);
+        midiMessages.swapWith(arpOutput);
+    }
 
     // Render the active synth voices
     synth.renderNextBlock(buffer, midiMessages, 0, buffer.getNumSamples());

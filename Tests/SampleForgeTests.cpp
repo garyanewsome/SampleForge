@@ -5,6 +5,7 @@
 #include <cmath>
 #include <iostream>
 
+#include "Arpeggiator.h"
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 
@@ -106,7 +107,7 @@ void pumpMessages(int ms)
 } // namespace
 
 // --snapshot out.png : renders the editor offscreen with a few demo zones loaded.
-int snapshot(const juce::File& png)
+int snapshot(const juce::File& png, int page)
 {
     auto demo = [](const juce::String& name, double rate, int length, std::function<float(double, double)> fn) {
         auto file = tempDir().getChildFile(name);
@@ -136,11 +137,25 @@ int snapshot(const juce::File& png)
     proc.setSelectedZoneIndex(2);
     setParam(proc, "SUSTAIN", 0.7f); setParam(proc, "RELEASE", 0.8f); setParam(proc, "FILTER_CUTOFF", 4200.0f);
     setParam(proc, "FILTER_RESONANCE", 1.4f); setParam(proc, "FILTER_ENV_AMOUNT", 1.0f); setParam(proc, "STRETCH", 1.5f); setParam(proc, "LOOP_MODE", 1.0f);
-    proc.keyboardState.noteOn(1, 64, 0.8f);
-    proc.keyboardState.noteOn(1, 67, 0.8f);
+    proc.apvts.state.setProperty("uiPage", page, nullptr);
+    if (page == 2)
+    {
+        setParam(proc, "ARP_ON", 1.0f); setParam(proc, "ARP_PATTERN", 2.0f); setParam(proc, "ARP_RATE", 3.0f);
+        setParam(proc, "ARP_OCTAVES", 2.0f); setParam(proc, "ARP_GATE", 0.7f); setParam(proc, "ARP_SWING", 0.3f);
+        for (int n : { 60, 64, 67, 71 }) proc.keyboardState.noteOn(1, n, 0.8f);
+        proc.setPlayConfigDetails(0, 2, 48000.0, 512);
+        proc.prepareToPlay(48000.0, 512);
+        juce::AudioBuffer<float> buf(2, 512);
+        for (int i = 0; i < 40; ++i) { juce::MidiBuffer m; proc.processBlock(buf, m); }
+    }
+    else
+    {
+        proc.keyboardState.noteOn(1, 64, 0.8f);
+        proc.keyboardState.noteOn(1, 67, 0.8f);
+    }
 
     std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
-    ed->setBounds(0, 0, 1280, 770);
+    ed->setBounds(0, 0, 1280, 690);
     pumpMessages(600);
     auto img = ed->createComponentSnapshot(ed->getLocalBounds(), true, 1.0f);
     png.deleteFile();
@@ -156,7 +171,7 @@ int main(int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI gui;
 
     if (argc >= 3 && juce::String(argv[1]) == "--snapshot")
-        return snapshot(juce::File(argv[2]));
+        return snapshot(juce::File(argv[2]), argc >= 4 ? juce::String(argv[3]).getIntValue() : 0);
 
     {
         std::cout << "[1] Velocity layers never steal voices from sounding notes\n";
@@ -465,6 +480,171 @@ int main(int argc, char** argv)
         double len = lengthAbove(out, 0.01f) / 48000.0;
         check(early > late * 2.0, "reversed swell fades out (early " + juce::String(early, 3) + " vs late " + juce::String(late, 3) + ")");
         check(std::abs(len - 2.0) < 0.15, "and takes about 2 s: " + juce::String(len, 2) + " s");
+    }
+
+    {
+        std::cout << "[11] Arpeggiator\n";
+        using namespace arp;
+        struct Ev { int pos; int note; bool on; };
+
+        // Runs one arpeggiator over `blocks` blocks, with `input` events given as
+        // absolute sample positions, and returns every note event it produced.
+        auto runArp = [](const Settings& s, const std::vector<Ev>& input, int totalSamples, int block, double bpm = 120.0,
+                         bool hostPlaying = false, double ppq = -1.0) {
+            Arpeggiator a;
+            a.reset();
+            std::vector<Ev> result;
+            juce::MidiBuffer in, out;
+            for (int start = 0; start < totalSamples; start += block)
+            {
+                in.clear();
+                for (auto& e : input)
+                    if (e.pos >= start && e.pos < start + block)
+                        in.addEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, 0.8f) : juce::MidiMessage::noteOff(1, e.note), e.pos - start);
+                a.process(in, out, block, 48000.0, s, bpm, hostPlaying, ppq < 0 ? ppq : ppq + (double) start * bpm / 60.0 / 48000.0);
+                for (const auto meta : out)
+                {
+                    auto m = meta.getMessage();
+                    if (m.isNoteOnOrOff()) result.push_back({ start + meta.samplePosition, m.getNoteNumber(), m.isNoteOn() });
+                }
+            }
+            return result;
+        };
+        auto onsOf = [](const std::vector<Ev>& v) { std::vector<Ev> r; for (auto& e : v) if (e.on) r.push_back(e); return r; };
+        auto notes = [&](const std::vector<Ev>& v, int count) {
+            std::vector<int> r; for (auto& e : onsOf(v)) if ((int) r.size() < count) r.push_back(e.note); return r; };
+        auto chord = std::vector<Ev> { { 0, 64, true }, { 0, 60, true }, { 0, 67, true } };   // pressed E, C, G
+        const int step16 = 6000;                                                              // 1/16 at 120 BPM, 48 kHz
+
+        Settings s; s.on = true; s.gate = 0.5f;
+        auto up = runArp(s, chord, step16 * 8, 512);
+        check(notes(up, 6) == std::vector<int> { 60, 64, 67, 60, 64, 67 }, "Up plays the chord low to high and repeats");
+        auto ons = onsOf(up);
+        check(ons.size() >= 4 && ons[0].pos == 0 && std::abs(ons[1].pos - step16) <= 1 && std::abs(ons[3].pos - 3 * step16) <= 1,
+              "steps land exactly every 1/16 note (" + juce::String(ons.size() > 1 ? ons[1].pos : -1) + ", " + juce::String(ons.size() > 3 ? ons[3].pos : -1) + ")");
+        int firstOff = -1; for (auto& e : up) if (!e.on) { firstOff = e.pos; break; }
+        check(std::abs(firstOff - step16 / 2) <= 1, "gate 50% releases half a step later (" + juce::String(firstOff) + ")");
+
+        Settings d = s; d.pattern = Down;
+        check(notes(runArp(d, chord, step16 * 8, 512), 4) == std::vector<int> { 67, 64, 60, 67 }, "Down plays high to low");
+        Settings ud = s; ud.pattern = UpDown;
+        check(notes(runArp(ud, chord, step16 * 8, 512), 8) == std::vector<int> { 60, 64, 67, 64, 60, 64, 67, 64 }, "Up/Down turns around without repeating the ends");
+        Settings du = s; du.pattern = DownUp;
+        check(notes(runArp(du, chord, step16 * 8, 512), 6) == std::vector<int> { 67, 64, 60, 64, 67, 64 }, "Down/Up turns around without repeating the ends");
+        Settings ap = s; ap.pattern = AsPlayed;
+        check(notes(runArp(ap, chord, step16 * 8, 512), 3) == std::vector<int> { 64, 60, 67 }, "As Played keeps the order the keys were pressed");
+        Settings rnd = s; rnd.pattern = arp::Random;
+        bool allIn = true; std::set<int> seen;
+        for (auto& e : onsOf(runArp(rnd, chord, step16 * 40, 512))) { allIn &= (e.note == 60 || e.note == 64 || e.note == 67); seen.insert(e.note); }
+        check(allIn && seen.size() == 3, "Random only picks held notes, and uses all of them");
+        Settings oct = s; oct.octaves = 2;
+        check(notes(runArp(oct, chord, step16 * 8, 512), 7) == std::vector<int> { 60, 64, 67, 72, 76, 79, 60 }, "2 octaves continues the chord an octave up");
+
+        // Swing: the second step of each pair is late, the next pair starts on time.
+        Settings sw = s; sw.swing = 1.0f;
+        auto swung = onsOf(runArp(sw, chord, step16 * 6, 512));
+        check(swung.size() >= 4 && std::abs(swung[1].pos - (int) (step16 * 1.5)) <= 1 && std::abs(swung[2].pos - 2 * step16) <= 1,
+              "full swing pushes every second step half a step late");
+
+        // Tempo and rate: 1/8T at 90 BPM = 60/90 * 1/3 s = 10666.67 samples.
+        Settings tri = s; tri.rate = 2;
+        auto trip = onsOf(runArp(tri, chord, 48000, 512, 90.0));
+        check(trip.size() >= 4 && std::abs(trip[3].pos - (int) std::lround(3 * 10666.6667)) <= 2, "1/8T at 90 BPM steps every 10667 samples");
+
+        // Releasing the keys stops it and sends the note off.
+        auto stopInput = chord; for (int n : { 64, 60, 67 }) stopInput.push_back({ step16 + 100, n, false });
+        auto stopped = runArp(s, stopInput, step16 * 5, 512);
+        check(onsOf(stopped).size() == 2 && !stopped.empty() && !stopped.back().on, "releasing the keys ends the arp with a note-off, no stuck notes");
+
+        // Latch keeps going; a new chord replaces it.
+        Settings lt = s; lt.latch = true;
+        auto latchIn = stopInput; latchIn.push_back({ step16 * 6, 72, true });
+        auto latched = runArp(lt, latchIn, step16 * 9, 512);
+        auto latchedOns = onsOf(latched);
+        bool oldKeepsGoing = false, newReplaces = true;
+        for (auto& e : latchedOns) { if (e.pos > step16 + 200 && e.pos < step16 * 6 && e.note != 72) oldKeepsGoing = true; if (e.pos >= step16 * 7 && e.note != 72) newReplaces = false; }
+        check(oldKeepsGoing, "latched notes keep playing after the keys are released");
+        check(newReplaces, "pressing a new key after release replaces the latched chord");
+
+        // Buffer size must not change what comes out.
+        auto small = runArp(oct, chord, step16 * 10, 64), big = runArp(oct, chord, step16 * 10, 2048);
+        bool same = small.size() == big.size();
+        for (size_t i = 0; same && i < small.size(); ++i) same = small[i].pos == big[i].pos && small[i].note == big[i].note && small[i].on == big[i].on;
+        check(same, "identical output at 64 and 2048 samples per block (" + juce::String((int) small.size()) + " events)");
+
+        // With the host playing, the first step waits for the next 1/16 on the grid.
+        auto aligned = onsOf(runArp(s, chord, step16 * 3, 512, 120.0, true, 0.10));
+        const double expected = (0.25 - 0.10) * 60.0 / 120.0 * 48000.0;     // 3600 samples
+        check(!aligned.empty() && std::abs(aligned[0].pos - (int) expected) <= 2, "with the host playing, the first step starts on the grid (" + juce::String(aligned.empty() ? -1 : aligned[0].pos) + ", expected " + juce::String((int) expected) + ")");
+
+        // Off = pass-through, and a key held before switching the arp on still releases.
+        Settings off; off.on = false;
+        auto passed = runArp(off, { { 0, 60, true }, { 1000, 60, false } }, 2048, 512);
+        check(passed.size() == 2 && passed[0].on && !passed[1].on && passed[1].pos == 1000, "arp off passes notes through untouched");
+        {
+            Arpeggiator a; a.reset();
+            juce::MidiBuffer in, out;
+            in.addEvent(juce::MidiMessage::noteOn(1, 60, 0.8f), 0);
+            a.process(in, out, 256, 48000.0, off, 120.0, false, -1.0);
+            in.clear(); out.clear();
+            a.process(in, out, 256, 48000.0, s, 120.0, false, -1.0);   // switched on while 60 is held
+            in.clear(); in.addEvent(juce::MidiMessage::noteOff(1, 60), 10);
+            a.process(in, out, 256, 48000.0, s, 120.0, false, -1.0);
+            bool released = false;
+            for (const auto meta : out) released |= meta.getMessage().isNoteOff() && meta.getMessage().getNoteNumber() == 60;
+            check(released, "a key held before the arp was switched on still gets its note-off");
+        }
+    }
+
+    {
+        std::cout << "[12] The arpeggiator inside the plugin\n";
+        auto hit = makeWav("arp_hit.wav", 48000, 2000, 1, 0.5f);
+        auto countHits = [](const std::vector<float>& v, int from, int to) {
+            int count = 0; bool on = false;
+            for (int i = from; i < to && i < (int) v.size(); ++i) {
+                if (!on && std::abs(v[(size_t) i]) > 0.05f) { on = true; ++count; }
+                if (on && std::abs(v[(size_t) i]) < 0.005f) on = false;
+            }
+            return count;
+        };
+        auto setup = [&](Rig& r) {
+            r.proc.addZoneFromFile(hit);
+            r.proc.getZone(0)->rootNote = 60;
+            setParam(r.proc, "ARP_ON", 1.0f);
+            setParam(r.proc, "ARP_RATE", 3.0f);      // 1/16
+            setParam(r.proc, "ATTACK", 0.001f);
+            setParam(r.proc, "RELEASE", 0.001f);
+        };
+        {
+            Rig r; setup(r);
+            auto out = r.render(48000 / 256, { { 60, 1.0f } });
+            int hits = countHits(out, 0, 48000);
+            check(hits >= 7 && hits <= 9, "one held key plays " + juce::String(hits) + " hits in a second at 1/16 (expected 8)");
+        }
+        {
+            Rig r; setup(r);
+            r.proc.setCurrentProgram(0);
+            // key down for ~0.4 s, then released; nothing should sound after the last hit decays
+            std::vector<float> out;
+            auto first = r.render(48000 * 4 / 10 / 256, { { 60, 1.0f } });
+            juce::AudioBuffer<float> buf(2, 256); juce::MidiBuffer midi;
+            midi.addEvent(juce::MidiMessage::noteOff(1, 60), 0);
+            r.proc.processBlock(buf, midi);
+            auto rest = r.render(48000 / 256);
+            check(peak(first) > 0.1f && peak(rest) < 0.05f, "releasing the key stops the arp (peak after release " + juce::String(peak(rest), 3) + ")");
+        }
+        {
+            Rig r; setup(r);
+            setParam(r.proc, "ARP_PATTERN", 2.0f); setParam(r.proc, "ARP_GATE", 0.8f); setParam(r.proc, "ARP_OCTAVES", 3.0f);
+            juce::MemoryBlock st; r.proc.getStateInformation(st);
+            Rig q;
+            q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            check(q.proc.apvts.getRawParameterValue("ARP_PATTERN")->load() == 2.0f
+                  && q.proc.apvts.getRawParameterValue("ARP_OCTAVES")->load() == 3.0f
+                  && std::abs(q.proc.apvts.getRawParameterValue("ARP_GATE")->load() - 0.8f) < 1e-4f
+                  && q.proc.apvts.getRawParameterValue("ARP_ON")->load() > 0.5f,
+                  "arp settings are saved with the session");
+        }
     }
 
     std::cout << (failures == 0 ? "\nALL PASSED\n" : "\nFAILURES: " + juce::String(failures) + "\n");
