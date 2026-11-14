@@ -61,7 +61,8 @@ struct Rig
         proc.prepareToPlay(sr, block);
     }
     // Renders `blocks` blocks; `noteOns` are fired at the start of the first block.
-    std::vector<float> render(int blocks, const std::vector<std::pair<int, float>>& noteOns = {})
+    std::vector<float> render(int blocks, const std::vector<std::pair<int, float>>& noteOns = {},
+                              const std::vector<std::pair<int, juce::MidiMessage>>& extra = {})
     {
         std::vector<float> out;
         juce::AudioBuffer<float> buf(2, block);
@@ -69,6 +70,8 @@ struct Rig
         {
             buf.clear();
             juce::MidiBuffer midi;
+            for (auto& e : extra)
+                if (e.first == i) midi.addEvent(e.second, 0);   // `first` = block index
             if (i == 0)
                 for (auto& n : noteOns) midi.addEvent(juce::MidiMessage::noteOn(1, n.first, n.second), 0);
             proc.processBlock(buf, midi);
@@ -297,6 +300,122 @@ int main()
                   "dropping the file relinks the same zone with its settings");
             (void) moved;
         }
+    }
+
+    {
+        std::cout << "[9] Pitch bend\n";
+        auto tone = makeWav("bend440.wav", 48000, 48000 * 4, 0, 440.0f);
+        auto freqOf = [](const std::vector<float>& v, int from, int to) {
+            int crossings = 0;
+            for (int i = from + 1; i < to; ++i) if (v[(size_t) i - 1] <= 0.0f && v[(size_t) i] > 0.0f) ++crossings;
+            return crossings * 48000.0 / (to - from);
+        };
+        auto run = [&](float range, int wheelBefore, int wheelAfter) {
+            Rig r;
+            r.proc.addZoneFromFile(tone);
+            r.proc.getZone(0)->rootNote = 69;
+            setParam(r.proc, "BEND_RANGE", range);
+            std::vector<std::pair<int, juce::MidiMessage>> extra;
+            if (wheelBefore >= 0) extra.push_back({ 0, juce::MidiMessage::pitchWheel(1, wheelBefore) });
+            if (wheelAfter >= 0) extra.push_back({ 60, juce::MidiMessage::pitchWheel(1, wheelAfter) });
+            auto out = r.render(48000 * 2 / 256, { { 69, 1.0f } }, extra);
+            return freqOf(out, 48000, 48000 * 2 - 256);
+        };
+        check(std::abs(run(2.0f, -1, -1) - 440.0) < 2.0, "wheel at centre: 440 Hz");
+        double up2 = run(2.0f, 16383, -1);
+        check(std::abs(up2 - 440.0 * std::pow(2.0, 2.0 / 12.0)) < 3.0, "wheel up, range 2: " + juce::String(up2, 1) + " Hz (expected 493.9)");
+        double up12 = run(12.0f, 16383, -1);
+        check(std::abs(up12 - 880.0) < 6.0, "wheel up, range 12: " + juce::String(up12, 1) + " Hz (expected 880)");
+        double down = run(2.0f, 0, -1);
+        check(std::abs(down - 440.0 * std::pow(2.0, -2.0 / 12.0)) < 3.0, "wheel down, range 2: " + juce::String(down, 1) + " Hz (expected 392)");
+        double live = run(2.0f, -1, 16383);
+        check(std::abs(live - 493.9) < 3.0, "bending a note already sounding: " + juce::String(live, 1) + " Hz");
+        check(run(0.0f, 16383, -1) < 442.0, "range 0 disables the wheel");
+    }
+
+    {
+        std::cout << "[10] Stretch works while looping and in reverse\n";
+        // 1 s of silence with a 50 ms 440 Hz burst every 250 ms.
+        auto bursts = tempDir().getChildFile("bursts.wav");
+        {
+            bursts.deleteFile();
+            juce::AudioBuffer<float> b(2, 48000);
+            b.clear();
+            for (int i = 0; i < 48000; ++i)
+                if ((i % 12000) < 2400) { float v = 0.6f * (float) std::sin(2.0 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0); b.setSample(0, i, v); b.setSample(1, i, v); }
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::FileOutputStream> out(bursts.createOutputStream());
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(out.get(), 48000, 2, 24, {}, 0));
+            out.release();
+            w->writeFromAudioSampleBuffer(b, 0, 48000);
+        }
+        auto countBursts = [](const std::vector<float>& v) {
+            int count = 0; bool on = false; float env = 0;
+            for (float x : v) {
+                env = std::max(std::abs(x), env * 0.9995f);
+                if (!on && env > 0.15f) { on = true; ++count; }
+                if (on && env < 0.04f) on = false;
+            }
+            return count;
+        };
+        auto bursty = [&](float stretch, int loopMode) {
+            Rig r;
+            r.proc.addZoneFromFile(bursts);
+            r.proc.getZone(0)->rootNote = 69;
+            setParam(r.proc, "LOOP_MODE", (float) loopMode);
+            setParam(r.proc, "STRETCH", stretch);
+            auto out = r.render(48000 * 4 / 256, { { 69, 1.0f } });
+            return std::make_pair(countBursts(out), peak(out));
+        };
+        auto plain = bursty(1.0f, 1), slow = bursty(2.0f, 1);
+        check(plain.first >= 15 && plain.first <= 17, "forward loop, no stretch: " + juce::String(plain.first) + " bursts in 4 s (expected 16)");
+        check(slow.first >= 7 && slow.first <= 9, "forward loop, stretch 2x: " + juce::String(slow.first) + " bursts in 4 s (expected 8)");
+        check(slow.second > 0.1f, "and it is still sounding");
+        auto pp = bursty(2.0f, 2);
+        check(pp.first >= 6 && pp.second > 0.1f, "ping-pong loop with stretch keeps playing (" + juce::String(pp.first) + " bursts)");
+
+        // Loop seam under stretch: a sine that does not fit the loop evenly.
+        auto odd = makeWav("odd.wav", 48000, 22222, 0, 441.37f);
+        auto step = [&](bool stretched) -> double {
+            Rig r;
+            r.proc.addZoneFromFile(odd);
+            r.proc.getZone(0)->rootNote = 69;
+            setParam(r.proc, "LOOP_MODE", 1.0f);
+            setParam(r.proc, "ATTACK", 0.001f);
+            setParam(r.proc, "STRETCH", stretched ? 1.5f : 1.0f);
+            auto out = r.render(48000 * 3 / 256, { { 69, 1.0f } });
+            // Roughness: energy of the second difference relative to the signal. A clean
+            // sine gives ~0.003; a click at every loop wrap adds broadband energy.
+            double d2 = 0, e = 1e-12;
+            for (int i = 24002; i < (int) out.size(); ++i) { double x = out[(size_t) i] - 2.0 * out[(size_t) i - 1] + out[(size_t) i - 2]; d2 += x * x; e += (double) out[(size_t) i] * out[(size_t) i]; }
+            return std::sqrt(d2 / e);
+        };
+        double rough = step(true);
+        check(rough < 0.005, "stretched loop stays as clean as a pure sine: roughness " + juce::String(rough, 4) + " (clean sine 0.0033; unfaded seam 0.0085)");
+
+        // Reverse + stretch: a swell played backwards must fade out, and last twice as long.
+        auto swell = tempDir().getChildFile("swell.wav");
+        {
+            swell.deleteFile();
+            juce::AudioBuffer<float> b(2, 48000);
+            for (int i = 0; i < 48000; ++i) { float v = 0.8f * (i / 48000.0f) * (float) std::sin(2.0 * juce::MathConstants<double>::pi * 440.0 * i / 48000.0); b.setSample(0, i, v); b.setSample(1, i, v); }
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::FileOutputStream> out(swell.createOutputStream());
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(out.get(), 48000, 2, 24, {}, 0));
+            out.release();
+            w->writeFromAudioSampleBuffer(b, 0, 48000);
+        }
+        Rig rv;
+        rv.proc.addZoneFromFile(swell);
+        rv.proc.getZone(0)->rootNote = 69;
+        rv.proc.getZone(0)->reverse = true;
+        setParam(rv.proc, "STRETCH", 2.0f);
+        auto out = rv.render(48000 * 4 / 256, { { 69, 1.0f } });
+        auto rms = [&](int a, int b2) { double e = 0; for (int i = a; i < b2; ++i) e += out[(size_t) i] * out[(size_t) i]; return std::sqrt(e / (b2 - a)); };
+        double early = rms(4800, 24000), late = rms(72000, 91000);
+        double len = lengthAbove(out, 0.01f) / 48000.0;
+        check(early > late * 2.0, "reversed swell fades out (early " + juce::String(early, 3) + " vs late " + juce::String(late, 3) + ")");
+        check(std::abs(len - 2.0) < 0.15, "and takes about 2 s: " + juce::String(len, 2) + " s");
     }
 
     std::cout << (failures == 0 ? "\nALL PASSED\n" : "\nFAILURES: " + juce::String(failures) + "\n");

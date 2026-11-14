@@ -98,9 +98,11 @@ struct VoiceParams
 
     // 1.0 = bypass (the original resampling-based playback path, unchanged).
     // Anything else routes through RubberBandStretcher instead — see
-    // SampleForgeVoice::renderNextBlock. Only supported for non-looping,
-    // non-reversed playback; see the scope note there.
+    // SampleForgeVoice::renderNextBlock. Supported with every loop mode and in reverse.
     std::atomic<float>* stretchRatio = nullptr;
+
+    // Pitch wheel range in semitones (each direction).
+    std::atomic<float>* bendRange = nullptr;
 };
 
 // Keep in sync with the "LOOP_MODE" AudioParameterChoice's string array.
@@ -133,15 +135,31 @@ public:
     void prepareVoice(double sampleRate, int samplesPerBlock, int numChannels);
 
 private:
+    // How the stretcher's input follows the zone's loop settings. In Off mode the
+    // source plays once (forwards, or backwards when reversed) and the note ends
+    // when it is exhausted. Forward looping wraps with a short crossfade between
+    // the loop's tail and head so the stretcher never sees a discontinuity;
+    // ping-pong reflects, which is continuous already.
+    struct StretchFeed
+    {
+        int mode = 0;            // LoopMode as int
+        double loopEnd = 0.0;
+        double crossfade = 0.0;  // source samples
+    };
+
     // Pulls `numSamples` of time/pitch-stretched audio into stretchOutputScratch,
     // feeding more source material into `stretcher` in fixed-size chunks as
-    // needed. Returns false once the source (Start..End) is exhausted and the
-    // stretcher has fully drained (available() == -1) — the note is over.
-    bool fillStretchedBlock(int numSamples);
+    // needed. Returns false once the source is exhausted and the stretcher has
+    // fully drained (available() == -1) — the note is over. Looping notes never
+    // exhaust; they end when the envelope does.
+    bool fillStretchedBlock(int numSamples, const StretchFeed& feed);
 
     SampleForgeSound* currentSound = nullptr;
     double sourcePosition = 0.0;
-    double pitchRatio = 1.0;
+    double pitchRatio = 1.0;      // what is actually used: basePitchRatio plus pitch bend
+    double basePitchRatio = 1.0;  // note and sample-rate ratio only
+    int wheelPosition = 8192;     // 0..16383, 8192 = centre
+    double bendSemitones = 0.0;   // smoothed towards the wheel's target
 
     // Forward-loop declick: when the loop wraps, the old read position keeps
     // playing for a few ms while fading out under the new one fading in, so

@@ -128,10 +128,14 @@ private:
     juce::Label attackLabel, decayLabel, sustainLabel, releaseLabel, gainLabel, cutoffLabel, resonanceLabel, filterEnvLabel;
 
     // Lives in the Playback panel, under Loop/Sync — RubberBandStretcher-backed;
-    // only takes effect for non-looping, non-reversed zones (see SampleForgeVoice).
+    // works with every loop mode and in reverse (see SampleForgeVoice).
     juce::Slider stretchSlider;
     juce::Label stretchLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> stretchAtt;
+
+    juce::Slider bendSlider;
+    juce::Label bendLabel;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> bendAtt;
 
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attackAtt, decayAtt, sustainAtt, releaseAtt, gainAtt,
         cutoffAtt, resonanceAtt, filterEnvAtt;

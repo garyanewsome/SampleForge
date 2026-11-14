@@ -18,7 +18,7 @@ bool SampleForgeVoice::canPlaySound(juce::SynthesiserSound* sound)
     return dynamic_cast<SampleForgeSound*>(sound) != nullptr;
 }
 
-void SampleForgeVoice::startNote(int midiNoteNumber, float velocity, juce::SynthesiserSound* sound, int /*currentPitchWheelPosition*/)
+void SampleForgeVoice::startNote(int midiNoteNumber, float velocity, juce::SynthesiserSound* sound, int currentPitchWheelPosition)
 {
     currentSound = dynamic_cast<SampleForgeSound*>(sound);
 
@@ -69,7 +69,13 @@ void SampleForgeVoice::startNote(int midiNoteNumber, float velocity, juce::Synth
 
     double noteRatio = std::pow(2.0, (midiNoteNumber - rootNote) / 12.0);
     double sampleRateRatio = currentSound->sourceSampleRate / getSampleRate();
-    pitchRatio = noteRatio * sampleRateRatio;
+    basePitchRatio = noteRatio * sampleRateRatio;
+
+    // A note starting under a held bend begins at the bent pitch immediately.
+    wheelPosition = currentPitchWheelPosition;
+    float range = voiceParams.bendRange != nullptr ? voiceParams.bendRange->load() : 2.0f;
+    bendSemitones = (wheelPosition - 8192) / 8192.0 * range;
+    pitchRatio = basePitchRatio * std::exp2(bendSemitones / 12.0);
 }
 
 void SampleForgeVoice::stopNote(float /*velocity*/, bool allowTailOff)
@@ -85,7 +91,12 @@ void SampleForgeVoice::stopNote(float /*velocity*/, bool allowTailOff)
     }
 }
 
-void SampleForgeVoice::pitchWheelMoved(int) {}
+void SampleForgeVoice::pitchWheelMoved(int newPitchWheelValue)
+{
+    // Picked up (and smoothed) at the start of the next render block; the base
+    // class splits blocks at MIDI events, so this is effectively sample-accurate.
+    wheelPosition = newPitchWheelValue;
+}
 void SampleForgeVoice::controllerMoved(int, int) {}
 
 void SampleForgeVoice::prepareVoice(double sampleRate, int samplesPerBlock, int numChannels)
@@ -114,8 +125,7 @@ void SampleForgeVoice::prepareVoice(double sampleRate, int samplesPerBlock, int 
     }
 }
 
-bool SampleForgeVoice::fillStretchedBlock(int numSamples)
-{
+bool SampleForgeVoice::fillStretchedBlock(int numSamples, const StretchFeed& feed){
     const auto& sourceData = currentSound->data;
     int numSourceChannels = sourceData.getNumChannels();
     int sourceNumSamples = sourceData.getNumSamples();
@@ -157,21 +167,76 @@ bool SampleForgeVoice::fillStretchedBlock(int numSamples)
 
         int fed = 0;
         bool exhausted = false;
+        const bool looping = feed.mode != static_cast<int>(LoopMode::off) && feed.loopEnd > startSampleInSource;
+        const double xf = looping && feed.mode == static_cast<int>(LoopMode::forward) ? feed.crossfade : 0.0;
+        const int lastIndex = sourceNumSamples - 1;
+
         while (fed < stretchChunkSize)
         {
-            int idx = static_cast<int>(sourcePosition);
-            if (idx < static_cast<int>(startSampleInSource) || idx >= static_cast<int>(endSampleInSource) || idx >= sourceNumSamples)
+            if (looping)
+            {
+                if (feed.mode == static_cast<int>(LoopMode::forward))
+                {
+                    if (loopDirection > 0 && sourcePosition >= feed.loopEnd)
+                        sourcePosition = sourcePosition - feed.loopEnd + startSampleInSource + xf;
+                    else if (loopDirection < 0 && sourcePosition <= startSampleInSource)
+                        sourcePosition = sourcePosition - startSampleInSource + feed.loopEnd - xf;
+                }
+                else // ping-pong: reflecting keeps the signal continuous
+                {
+                    for (int guard = 0; guard < 4; ++guard)
+                    {
+                        if (sourcePosition >= feed.loopEnd)
+                        {
+                            sourcePosition = feed.loopEnd - (sourcePosition - feed.loopEnd);
+                            loopDirection = -1;
+                        }
+                        else if (sourcePosition <= startSampleInSource)
+                        {
+                            sourcePosition = startSampleInSource + (startSampleInSource - sourcePosition);
+                            loopDirection = 1;
+                        }
+                        else
+                            break;
+                    }
+                }
+            }
+
+            int idx = loopDirection > 0 ? static_cast<int>(sourcePosition) : static_cast<int>(sourcePosition) - 1;
+
+            if (!looping && (idx < static_cast<int>(startSampleInSource) || idx >= static_cast<int>(endSampleInSource) || idx < 0 || idx > lastIndex))
             {
                 exhausted = true;
                 break;
             }
 
+            idx = juce::jlimit(0, lastIndex, idx);
+
+            // Seamless-loop crossfade: approaching the loop point, blend towards the
+            // material that will follow the wrap (see StretchFeed).
+            float w = 0.0f;
+            int otherIdx = idx;
+            if (xf > 0.0 && loopDirection > 0 && sourcePosition >= feed.loopEnd - xf)
+            {
+                w = static_cast<float>((sourcePosition - (feed.loopEnd - xf)) / xf);
+                otherIdx = juce::jlimit(0, lastIndex, static_cast<int>(startSampleInSource + (sourcePosition - (feed.loopEnd - xf))));
+            }
+            else if (xf > 0.0 && loopDirection < 0 && sourcePosition <= startSampleInSource + xf)
+            {
+                w = static_cast<float>((startSampleInSource + xf - sourcePosition) / xf);
+                otherIdx = juce::jlimit(0, lastIndex, static_cast<int>(feed.loopEnd - xf + (sourcePosition - startSampleInSource)) - 1);
+            }
+            w = juce::jlimit(0.0f, 1.0f, w);
+
             for (int ch = 0; ch < 2; ++ch)
             {
                 int srcCh = juce::jmin(ch, numSourceChannels - 1);
-                stretchInputScratch[ch][static_cast<size_t>(fed)] = sourceData.getSample(srcCh, idx);
+                float v = sourceData.getSample(srcCh, idx);
+                if (w > 0.0f)
+                    v = v * (1.0f - w) + sourceData.getSample(srcCh, otherIdx) * w;
+                stretchInputScratch[ch][static_cast<size_t>(fed)] = v;
             }
-            sourcePosition += 1.0;
+            sourcePosition += static_cast<double>(loopDirection);
             ++fed;
         }
 
@@ -248,16 +313,50 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
         rightGain = std::sin(panAngle);
     }
 
-    // Time-stretch: only for non-looping, non-reversed playback. Looping and
-    // reverse both rely on arbitrarily jumping/reflecting sourcePosition,
-    // which the stretcher can't follow (it only ever consumes source audio
-    // moving strictly forward) — combining them is a real feature gap, not
-    // an oversight, and is called out as such wherever Stretch is exposed.
+    // Time-stretch works with every loop mode and in reverse: the stretcher is
+    // simply fed a source stream that already follows the zone's loop/reverse
+    // behaviour (see fillStretchedBlock).
     float stretchRatio = voiceParams.stretchRatio != nullptr ? voiceParams.stretchRatio->load() : 1.0f;
-    bool useStretch = stretcher != nullptr
-                     && std::abs(stretchRatio - 1.0f) > 0.001f
-                     && loopMode == LoopMode::off
-                     && !currentSound->reverse.load();
+    bool useStretch = stretcher != nullptr && std::abs(stretchRatio - 1.0f) > 0.001f;
+
+    // Smoothly follow the pitch wheel. Per block here; per sample in the plain
+    // resampling path below.
+    const float bendRange = voiceParams.bendRange != nullptr ? voiceParams.bendRange->load() : 2.0f;
+    const double bendTarget = (wheelPosition - 8192) / 8192.0 * bendRange;
+    const double bendCoef = 1.0 - std::exp(-1.0 / (0.005 * getSampleRate()));
+    if (useStretch && bendSemitones != bendTarget)
+    {
+        bendSemitones += (bendTarget - bendSemitones) * (1.0 - std::exp(-numSamples / (0.005 * getSampleRate())));
+        if (std::abs(bendTarget - bendSemitones) < 1.0e-4) bendSemitones = bendTarget;
+        pitchRatio = basePitchRatio * std::exp2(bendSemitones / 12.0);
+    }
+
+    // Loop length: the trim region, or a tempo-derived length when Loop Sync is
+    // on. Tempo sync never extends past the trim End and only affects looping modes.
+    double rawTrimLength = endSampleInSource - startSampleInSource;
+    double loopEnd = endSampleInSource;
+
+    int loopSyncIndex = voiceParams.loopSyncRate != nullptr ? static_cast<int>(voiceParams.loopSyncRate->load()) : 0;
+    if (loopSyncIndex > 0 && loopMode != LoopMode::off && rawTrimLength > 0.0)
+    {
+        static constexpr double noteFactors[] = { 0.0, 4.0, 2.0, 1.0, 0.5, 0.25 }; // whole, 1/2, 1/4, 1/8, 1/16
+        double bpm = voiceParams.tempoBpm != nullptr ? static_cast<double>(voiceParams.tempoBpm->load()) : 120.0;
+        if (bpm <= 0.0)
+            bpm = 120.0;
+
+        double syncedSeconds = noteFactors[juce::jlimit(0, 5, loopSyncIndex)] * (60.0 / bpm);
+        // Resampling: source advances pitchRatio per output sample. Stretching:
+        // pitch is decoupled, so a loop of L source samples lasts
+        // L * stretch / sourceRate seconds, whatever note is played.
+        double syncedSourceSamples = useStretch
+                                         ? syncedSeconds * currentSound->sourceSampleRate / static_cast<double>(stretchRatio)
+                                         : syncedSeconds * pitchRatio * getSampleRate();
+
+        if (syncedSourceSamples > 0.0)
+            loopEnd = startSampleInSource + juce::jmin(rawTrimLength, syncedSourceSamples);
+    }
+
+    double loopLength = loopEnd - startSampleInSource;
 
     if (useStretch)
     {
@@ -269,7 +368,12 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
         stretcher->setPitchScale(pitchRatio);
         stretcher->setTimeRatio(static_cast<double>(stretchRatio) * rateRatio);
 
-        bool stillPlaying = fillStretchedBlock(numSamples);
+        StretchFeed feed;
+        feed.mode = static_cast<int>(loopMode);
+        feed.loopEnd = loopEnd;
+        feed.crossfade = juce::jmin(0.005 * currentSound->sourceSampleRate, 0.25 * loopLength);
+
+        bool stillPlaying = fillStretchedBlock(numSamples, feed);
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
@@ -299,31 +403,6 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
 
         return;
     }
-
-    // Tempo sync overrides the loop's wrap/bounce point (never Start, and
-    // never past the user's own trim End) with a length derived from the
-    // host's tempo, scaled by pitchRatio so the loop takes the same real
-    // time regardless of which note is played. Only affects actual looping
-    // modes — "Off" still always stops exactly at the trim End.
-    double rawTrimLength = endSampleInSource - startSampleInSource;
-    double loopEnd = endSampleInSource;
-
-    int loopSyncIndex = voiceParams.loopSyncRate != nullptr ? static_cast<int>(voiceParams.loopSyncRate->load()) : 0;
-    if (loopSyncIndex > 0 && loopMode != LoopMode::off && rawTrimLength > 0.0)
-    {
-        static constexpr double noteFactors[] = { 0.0, 4.0, 2.0, 1.0, 0.5, 0.25 }; // whole, 1/2, 1/4, 1/8, 1/16
-        double bpm = voiceParams.tempoBpm != nullptr ? static_cast<double>(voiceParams.tempoBpm->load()) : 120.0;
-        if (bpm <= 0.0)
-            bpm = 120.0;
-
-        double syncedSeconds = noteFactors[juce::jlimit(0, 5, loopSyncIndex)] * (60.0 / bpm);
-        double syncedSourceSamples = syncedSeconds * pitchRatio * getSampleRate();
-
-        if (syncedSourceSamples > 0.0)
-            loopEnd = startSampleInSource + juce::jmin(rawTrimLength, syncedSourceSamples);
-    }
-
-    double loopLength = loopEnd - startSampleInSource;
 
     // 4-point, 3rd-order Lagrange interpolation (Niemitalo/musicdsp.org) for
     // smooth pitched playback; positions are clamped to the sample data.
@@ -417,6 +496,14 @@ void SampleForgeVoice::renderNextBlock(juce::AudioBuffer<float>& outputBuffer, i
 
         float env = adsr.getNextSample();
         lastEnvValue = env;
+
+        if (bendSemitones != bendTarget)
+        {
+            bendSemitones += (bendTarget - bendSemitones) * bendCoef;
+            if (std::abs(bendTarget - bendSemitones) < 1.0e-4)
+                bendSemitones = bendTarget;
+            pitchRatio = basePitchRatio * std::exp2(bendSemitones / 12.0);
+        }
 
         // Short fade out over the last ~2 ms before the trim End (or Start when
         // reversed), so a one-shot never ends on a hard cut. Looping modes never
@@ -540,6 +627,7 @@ SampleForgeAudioProcessor::SampleForgeAudioProcessor()
     voiceParams.filterResonance = apvts.getRawParameterValue("FILTER_RESONANCE");
     voiceParams.filterEnvAmount = apvts.getRawParameterValue("FILTER_ENV_AMOUNT");
     voiceParams.stretchRatio = apvts.getRawParameterValue("STRETCH");
+    voiceParams.bendRange = apvts.getRawParameterValue("BEND_RANGE");
 
     synth.rrOrderParam = apvts.getRawParameterValue("RR_ORDER");
 
@@ -606,6 +694,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout SampleForgeAudioProcessor::c
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("STRETCH", 1), "Stretch",
         juce::NormalisableRange<float>(0.25f, 4.0f, 0.001f, 0.4f), 1.0f));
+
+    // Pitch wheel range, semitones each way (standard synth default is 2).
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID("BEND_RANGE", 1), "Bend Range",
+        juce::NormalisableRange<float>(0.0f, 12.0f, 1.0f), 2.0f));
 
     return { params.begin(), params.end() };
 }

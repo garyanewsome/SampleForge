@@ -493,6 +493,13 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     stretchSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
     stretchLabel.setJustificationType(juce::Justification::centredRight);
 
+    setupSlider(bendSlider, bendLabel, "Bend", bendAtt, "BEND_RANGE");
+    bendSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    bendSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    bendSlider.setNumDecimalPlacesToDisplay(0);
+    bendSlider.setTextValueSuffix(" st");
+    bendLabel.setJustificationType(juce::Justification::centredRight);
+
     // Raw floats (seconds, 0-1 fraction) read awkwardly on a control surface;
     // show Attack/Decay/Release in milliseconds and Sustain/Gain as a percentage.
     auto secondsToMs = [](double seconds) { return juce::String(juce::roundToInt(seconds * 1000.0)) + " ms"; };
@@ -804,4 +811,9 @@ void SampleForgeAudioProcessorEditor::resized()
     auto stretchRow = playbackContent.removeFromTop(28);
     stretchLabel.setBounds(stretchRow.removeFromLeft(50));
     stretchSlider.setBounds(stretchRow);
+
+    playbackContent.removeFromTop(6);
+    auto bendRow = playbackContent.removeFromTop(28);
+    bendLabel.setBounds(bendRow.removeFromLeft(50));
+    bendSlider.setBounds(bendRow);
 }
