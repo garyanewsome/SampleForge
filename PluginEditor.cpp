@@ -83,7 +83,7 @@ void WaveformDisplay::paint(juce::Graphics& g)
     {
         SampleForgeLookAndFeel::drawGlowText(g, fileDragHover ? "Drop to add zone" : "Add a zone to get started (or drop a file here)",
                    getLocalBounds(), juce::Justification::centred, SampleForgeLookAndFeel::uiFont(16.0f),
-                   SampleForgeLookAndFeel::getTextColour().withAlpha(0.6f), 0.8f);
+                   SampleForgeLookAndFeel::getTextColour().withAlpha(0.6f), 0.3f);
 
         if (fileDragHover)
         {
@@ -638,7 +638,7 @@ void SampleForgeAudioProcessorEditor::paintListBoxItem(int rowNumber, juce::Grap
                                          juce::Justification::centredLeft, SampleForgeLookAndFeel::monoFont(12.0f),
                                          zone->missing ? SampleForgeLookAndFeel::getWarningColour()
                                                        : SampleForgeLookAndFeel::getTextColour(),
-                                         rowIsSelected ? 0.8f : 0.3f);
+                                         0.0f);
 }
 
 void SampleForgeAudioProcessorEditor::listBoxItemClicked(int row, const juce::MouseEvent&)
@@ -723,7 +723,7 @@ void SampleForgeAudioProcessorEditor::drawPanel(juce::Graphics& g, juce::Rectang
     SampleForgeLookAndFeel::drawGlowText(g, title.toUpperCase(), bounds.withHeight(20).withY(bounds.getY() + 3).reduced(12, 0),
                                          juce::Justification::centredLeft,
                                          SampleForgeLookAndFeel::uiFont(11.0f, true),
-                                         SampleForgeLookAndFeel::getDimTextColour().brighter(0.6f), 0.7f);
+                                         SampleForgeLookAndFeel::getDimTextColour().brighter(0.6f), 0.5f);
 }
 
 void SampleForgeAudioProcessorEditor::resized()

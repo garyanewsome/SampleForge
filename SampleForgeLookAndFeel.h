@@ -37,7 +37,7 @@ public:
         if (glow > 0.0f)
         {
             struct Ring { int d; float alpha; };
-            for (auto ring : { Ring { 3, 0.035f }, Ring { 2, 0.07f }, Ring { 1, 0.15f } })
+            for (auto ring : { Ring { 2, 0.045f }, Ring { 1, 0.10f } })
             {
                 g.setColour(colour.withAlpha(ring.alpha * glow));
                 for (int dx = -1; dx <= 1; ++dx)
@@ -121,7 +121,7 @@ public:
 
         drawGlowText(g, label.getText(), area, label.getJustificationType(), font,
                      label.findColour(juce::Label::textColourId).withMultipliedAlpha(alpha),
-                     isSliderText ? 0.5f : 1.0f);
+                     isSliderText ? 0.0f : 0.35f);
 
         if (label.getParentComponent() != nullptr && dynamic_cast<juce::Slider*>(label.getParentComponent()) != nullptr)
         {
@@ -282,7 +282,7 @@ public:
     void drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool) override
     {
         drawGlowText(g, b.getButtonText(), b.getLocalBounds().reduced(4, 0), juce::Justification::centred,
-                     getTextButtonFont(b, b.getHeight()), getTextColour().withMultipliedAlpha(b.isEnabled() ? 1.0f : 0.4f), 0.8f);
+                     getTextButtonFont(b, b.getHeight()), getTextColour().withMultipliedAlpha(b.isEnabled() ? 1.0f : 0.4f), 0.3f);
     }
 
     void drawToggleButton(juce::Graphics& g, juce::ToggleButton& b, bool highlighted, bool) override
@@ -304,7 +304,7 @@ public:
         g.drawRoundedRectangle(box, 3.0f, 1.2f);
 
         drawGlowText(g, b.getButtonText(), b.getLocalBounds().withTrimmedLeft((int) s + 12),
-                     juce::Justification::centredLeft, uiFont(13.0f), white, 0.8f);
+                     juce::Justification::centredLeft, uiFont(13.0f), white, 0.3f);
     }
 
     void drawComboBox(juce::Graphics& g, int width, int height, bool, int, int, int, int,
