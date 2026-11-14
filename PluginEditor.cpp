@@ -70,68 +70,86 @@ void WaveformDisplay::attachToSelectedZoneThumbnail()
 
 void WaveformDisplay::paint(juce::Graphics& g)
 {
+    using LAF = SampleForgeLookAndFeel;
     auto bounds = getLocalBounds().toFloat();
 
     g.setColour(juce::Colours::black);
     g.fillRect(bounds);
-    g.setColour(SampleForgeLookAndFeel::getLineColour());
-    g.drawRect(bounds, 1.0f);
+
+    // Faint graticule: centre line and vertical divisions, like a scope.
+    g.setColour(LAF::getAccentColour().withAlpha(0.10f));
+    g.fillRect(0.0f, bounds.getCentreY() - 0.5f, bounds.getWidth(), 1.0f);
+    for (int i = 1; i < 10; ++i)
+        g.fillRect(bounds.getWidth() * (float) i / 10.0f - 0.5f, 0.0f, 1.0f, bounds.getHeight());
 
     auto* zone = audioProcessor.getZone(audioProcessor.getSelectedZoneIndex());
 
     if (zone == nullptr || zone->thumbnail == nullptr || zone->thumbnail->getTotalLength() <= 0.0)
     {
-        SampleForgeLookAndFeel::drawGlowText(g, fileDragHover ? "Drop to add zone" : "Add a zone to get started (or drop a file here)",
-                   getLocalBounds(), juce::Justification::centred, SampleForgeLookAndFeel::uiFont(16.0f),
-                   SampleForgeLookAndFeel::getTextColour().withAlpha(0.6f), 0.3f);
-
-        if (fileDragHover)
-        {
-            g.setColour(SampleForgeLookAndFeel::getAccentColour());
-            g.drawRect(bounds, 2.0f);
-        }
+        LAF::drawGlowText(g, fileDragHover ? "DROP TO ADD ZONE" : "ADD A ZONE TO GET STARTED  /  OR DROP A FILE HERE",
+                          getLocalBounds(), juce::Justification::centred, LAF::hudFont(12.0f, 0.2f),
+                          LAF::getTextColour().withAlpha(0.7f), 0.3f);
+        LAF::drawBrackets(g, bounds.reduced(1.5f), 14.0f, 1.5f, LAF::getAccentColour(), fileDragHover ? 0.6f : 0.0f);
         return;
     }
 
-    // Halo first (a slightly taller, fainter copy), then the crisp peaks.
-    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.14f));
-    zone->thumbnail->drawChannels(g, getLocalBounds().expanded(0, 5), 0.0, zone->thumbnail->getTotalLength(), 1.0f);
-    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.22f));
-    zone->thumbnail->drawChannels(g, getLocalBounds().expanded(0, 2), 0.0, zone->thumbnail->getTotalLength(), 1.0f);
-    g.setColour(SampleForgeLookAndFeel::getAccentColour());
-    zone->thumbnail->drawChannels(g, getLocalBounds(), 0.0, zone->thumbnail->getTotalLength(), 1.0f);
+    const double length = zone->thumbnail->getTotalLength();
+
+    // Peaks: a faint halo copy, then the crisp trace.
+    g.setColour(LAF::getAccentColour().withAlpha(0.12f));
+    zone->thumbnail->drawChannels(g, getLocalBounds().expanded(0, 4), 0.0, length, 1.0f);
+    g.setColour(LAF::getAccentColour());
+    zone->thumbnail->drawChannels(g, getLocalBounds(), 0.0, length, 1.0f);
 
     float startNorm = zone->sampleStart.load();
     float endNorm = zone->sampleEnd.load();
-
     float startX = startNorm * bounds.getWidth();
     float endX = endNorm * bounds.getWidth();
 
-    // Dim the trimmed-out head/tail regions
+    // Dim the trimmed-out head/tail.
     g.setColour(juce::Colours::black.withAlpha(0.72f));
     if (startX > 0.0f)
         g.fillRect(bounds.withWidth(startX));
     if (endX < bounds.getWidth())
         g.fillRect(bounds.withLeft(endX));
 
-    g.setColour(juce::Colours::white.withAlpha(0.2f));
-    g.drawLine(startX, 0.0f, startX, bounds.getHeight(), 6.0f);
-    g.drawLine(endX, 0.0f, endX, bounds.getHeight(), 6.0f);
-    g.setColour(juce::Colours::white);
-    g.drawLine(startX, 0.0f, startX, bounds.getHeight(), 1.5f);
-    g.drawLine(endX, 0.0f, endX, bounds.getHeight(), 1.5f);
-
-    juce::Path startHandle, endHandle;
-    startHandle.addTriangle(startX - 6.0f, 0.0f, startX + 6.0f, 0.0f, startX, 10.0f);
-    endHandle.addTriangle(endX - 6.0f, 0.0f, endX + 6.0f, 0.0f, endX, 10.0f);
-    g.fillPath(startHandle);
-    g.fillPath(endHandle);
-
-    if (fileDragHover)
+    // Time ruler along the bottom: a tick every 5 %, a label every 10 %.
+    g.setColour(LAF::getDimTextColour().withAlpha(0.8f));
+    for (int i = 0; i <= 20; ++i)
     {
-        g.setColour(SampleForgeLookAndFeel::getAccentColour());
-        g.drawRect(bounds, 2.0f);
+        const float x = juce::jlimit(0.5f, bounds.getWidth() - 0.5f, bounds.getWidth() * (float) i / 20.0f);
+        const bool major = (i % 2 == 0);
+        g.fillRect(x - 0.5f, bounds.getBottom() - (major ? 8.0f : 4.0f), 1.0f, major ? 8.0f : 4.0f);
     }
+    g.setFont(LAF::monoFont(9.0f));
+    for (int i = 1; i < 10; i += 1)
+    {
+        const float x = bounds.getWidth() * (float) i / 10.0f;
+        g.drawText(juce::String(length * i / 10.0, 2) + "s", juce::Rectangle<float>(x - 22.0f, bounds.getBottom() - 21.0f, 44.0f, 12.0f),
+                   juce::Justification::centred, false);
+    }
+
+    // Trim lines: hairline with a halo, a small marker and a time read-out.
+    auto drawTrim = [&](float x, const juce::String& tag, double seconds, bool isStart)
+    {
+        g.setColour(juce::Colours::white.withAlpha(0.18f));
+        g.fillRect(x - 2.5f, 0.0f, 5.0f, bounds.getHeight());
+        g.setColour(juce::Colours::white);
+        g.fillRect(x - 0.5f, 0.0f, 1.0f, bounds.getHeight());
+
+        juce::Path marker;
+        marker.addTriangle(x - 6.0f, 0.0f, x + 6.0f, 0.0f, x, 9.0f);
+        g.fillPath(marker);
+
+        const auto label = juce::Rectangle<float>(isStart ? x + 8.0f : x - 88.0f, 2.0f, 80.0f, 12.0f);
+        g.setFont(LAF::monoFont(9.0f));
+        g.drawText(tag + " " + juce::String(seconds, 3) + "s", label,
+                   isStart ? juce::Justification::centredLeft : juce::Justification::centredRight, false);
+    };
+    drawTrim(startX, "S", startNorm * length, true);
+    drawTrim(endX, "E", endNorm * length, false);
+
+    LAF::drawBrackets(g, bounds.reduced(1.5f), 14.0f, 1.5f, LAF::getAccentColour(), fileDragHover ? 0.6f : 0.0f);
 }
 
 void WaveformDisplay::mouseDown(const juce::MouseEvent& e)
@@ -677,16 +695,34 @@ void SampleForgeAudioProcessorEditor::refreshZoneDetailControls()
 //==============================================================================
 void SampleForgeAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    g.fillAll(SampleForgeLookAndFeel::getWindowBackgroundColour());
+    using LAF = SampleForgeLookAndFeel;
+    g.fillAll(LAF::getWindowBackgroundColour());
 
-    // Title: big, letter-spaced, glowing. A hairline with a soft glow underneath.
-    SampleForgeLookAndFeel::drawGlowText(g, "S A M P L E F O R G E", juce::Rectangle<int>(20, 0, 520, 42),
-                                         juce::Justification::centredLeft,
-                                         SampleForgeLookAndFeel::uiFont(22.0f, true));
-    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.10f));
-    g.fillRect(0, 41, getWidth(), 4);
-    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.8f));
-    g.fillRect(0, 42, getWidth(), 1);
+    // Header: ring-and-crosshair mark, spaced title, a status tag on the right,
+    // and a hairline underneath with end ticks.
+    const float rx = 30.0f, ry = 21.0f;
+    g.setColour(LAF::getAccentColour().withAlpha(0.16f));
+    g.fillEllipse(rx - 12.0f, ry - 12.0f, 24.0f, 24.0f);
+    g.setColour(LAF::getAccentColour());
+    g.drawEllipse(rx - 9.0f, ry - 9.0f, 18.0f, 18.0f, 1.0f);
+    g.fillEllipse(rx - 2.5f, ry - 2.5f, 5.0f, 5.0f);
+    for (float a : { 0.0f, 90.0f, 180.0f, 270.0f })
+    {
+        const float dx = std::cos(juce::degreesToRadians(a)), dy = std::sin(juce::degreesToRadians(a));
+        g.drawLine(rx + dx * 11.0f, ry + dy * 11.0f, rx + dx * 15.0f, ry + dy * 15.0f, 1.0f);
+    }
+
+    LAF::drawGlowText(g, "S A M P L E F O R G E", juce::Rectangle<int>(54, 0, 420, 42),
+                      juce::Justification::centredLeft, LAF::hudFont(19.0f, 0.1f, true), LAF::getTextColour(), 0.8f);
+    LAF::drawGlowText(g, "MULTISAMPLE ENGINE  /  16 VOICES  /  RUBBERBAND STRETCH", juce::Rectangle<int>(getWidth() - 520, 0, 500, 42),
+                      juce::Justification::centredRight, LAF::hudFont(9.5f, 0.14f), LAF::getDimTextColour(), 0.0f);
+
+    g.setColour(LAF::getAccentColour().withAlpha(0.10f));
+    g.fillRect(0, 41, getWidth(), 3);
+    g.setColour(LAF::getAccentColour().withAlpha(0.65f));
+    g.fillRect(10, 42, getWidth() - 20, 1);
+    g.fillRect(10, 39, 1, 6);
+    g.fillRect(getWidth() - 11, 39, 1, 6);
 
     drawPanel(g, zonePanelBounds, "Zone");
     drawPanel(g, envelopePanelBounds, "Envelope");
@@ -696,34 +732,26 @@ void SampleForgeAudioProcessorEditor::paint(juce::Graphics& g)
 
 void SampleForgeAudioProcessorEditor::drawPanel(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::String& title)
 {
+    using LAF = SampleForgeLookAndFeel;
     if (bounds.isEmpty())
         return;
 
-    // Chamfered black panel with a hairline edge and a faint inner glow.
-    auto r = bounds.toFloat().reduced(0.5f);
-    const float ch = 7.0f;
-    juce::Path p;
-    p.startNewSubPath(r.getX() + ch, r.getY());
-    p.lineTo(r.getRight() - ch, r.getY());
-    p.lineTo(r.getRight(), r.getY() + ch);
-    p.lineTo(r.getRight(), r.getBottom() - ch);
-    p.lineTo(r.getRight() - ch, r.getBottom());
-    p.lineTo(r.getX() + ch, r.getBottom());
-    p.lineTo(r.getX(), r.getBottom() - ch);
-    p.lineTo(r.getX(), r.getY() + ch);
-    p.closeSubPath();
+    auto r = bounds.toFloat().reduced(1.0f);
+    g.setColour(LAF::getPanelColour());
+    g.fillRect(r);
+    LAF::drawBrackets(g, r, 16.0f, 1.4f, LAF::getAccentColour(), 0.10f);
 
-    g.setColour(SampleForgeLookAndFeel::getPanelColour());
-    g.fillPath(p);
-    g.setColour(SampleForgeLookAndFeel::getAccentColour().withAlpha(0.07f));
-    g.strokePath(p, juce::PathStrokeType(4.0f));
-    g.setColour(SampleForgeLookAndFeel::getLineColour().brighter(0.35f));
-    g.strokePath(p, juce::PathStrokeType(1.0f));
-
-    SampleForgeLookAndFeel::drawGlowText(g, title.toUpperCase(), bounds.withHeight(20).withY(bounds.getY() + 3).reduced(12, 0),
-                                         juce::Justification::centredLeft,
-                                         SampleForgeLookAndFeel::uiFont(11.0f, true),
-                                         SampleForgeLookAndFeel::getDimTextColour().brighter(0.6f), 0.5f);
+    // Title: a short tick, then spaced small caps, then a fading rule.
+    const int ty = bounds.getY() + 12;
+    g.setColour(LAF::getAccentColour());
+    g.fillRect(bounds.getX() + 12, ty, 10, 1);
+    const juce::String text = title.toUpperCase();
+    LAF::drawGlowText(g, text, juce::Rectangle<int>(bounds.getX() + 28, bounds.getY() + 4, 200, 16),
+                      juce::Justification::centredLeft, LAF::hudFont(10.0f, 0.22f, true), LAF::getTextColour().withAlpha(0.9f), 0.4f);
+    const int ruleStart = bounds.getX() + 34 + text.length() * 9;
+    g.setGradientFill(juce::ColourGradient(LAF::getAccentColour().withAlpha(0.35f), (float) ruleStart, (float) ty,
+                                           LAF::getAccentColour().withAlpha(0.0f), (float) bounds.getRight() - 18.0f, (float) ty, false));
+    g.fillRect((float) ruleStart, (float) ty, (float) (bounds.getRight() - 18 - ruleStart), 1.0f);
 }
 
 void SampleForgeAudioProcessorEditor::resized()
@@ -752,7 +780,8 @@ void SampleForgeAudioProcessorEditor::resized()
     //==========================================================================
     // Zone panel: zone list + per-zone controls, including RR Group right
     // next to RR Order since the two only make sense together.
-    zonePanelBounds = area.removeFromTop(230);
+    zonePanelBounds = area.removeFromTop(224);
+    area.removeFromTop(6); // breathing room between the brackets of the two rows
     auto zonePanel = zonePanelBounds.reduced(10, 4);
     zonePanel.removeFromTop(panelHeaderHeight);
 
@@ -818,7 +847,7 @@ void SampleForgeAudioProcessorEditor::resized()
     auto filterContent = filterPanelBounds.reduced(10, 4);
     filterContent.removeFromTop(panelHeaderHeight);
     auto filterTypeRow = filterContent.removeFromTop(26);
-    filterTypeLabel.setBounds(filterTypeRow.removeFromLeft(40));
+    filterTypeLabel.setBounds(filterTypeRow.removeFromLeft(58));
     filterTypeBox.setBounds(filterTypeRow.removeFromLeft(130));
     filterContent.removeFromTop(4);
 
@@ -832,20 +861,20 @@ void SampleForgeAudioProcessorEditor::resized()
     auto playbackContent = playbackPanelBounds.reduced(10, 4);
     playbackContent.removeFromTop(panelHeaderHeight);
     auto loopRow = playbackContent.removeFromTop(28);
-    loopModeLabel.setBounds(loopRow.removeFromLeft(40));
+    loopModeLabel.setBounds(loopRow.removeFromLeft(54));
     loopModeBox.setBounds(loopRow.removeFromLeft(110));
     playbackContent.removeFromTop(6);
     auto syncRow = playbackContent.removeFromTop(28);
-    loopSyncLabel.setBounds(syncRow.removeFromLeft(40));
+    loopSyncLabel.setBounds(syncRow.removeFromLeft(54));
     loopSyncBox.setBounds(syncRow.removeFromLeft(90));
 
     playbackContent.removeFromTop(10);
     auto stretchRow = playbackContent.removeFromTop(28);
-    stretchLabel.setBounds(stretchRow.removeFromLeft(50));
+    stretchLabel.setBounds(stretchRow.removeFromLeft(72));
     stretchSlider.setBounds(stretchRow);
 
     playbackContent.removeFromTop(6);
     auto bendRow = playbackContent.removeFromTop(28);
-    bendLabel.setBounds(bendRow.removeFromLeft(50));
+    bendLabel.setBounds(bendRow.removeFromLeft(72));
     bendSlider.setBounds(bendRow);
 }
