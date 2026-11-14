@@ -43,7 +43,7 @@ on:
 jobs:
   test:
     name: Build & test
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -66,7 +66,7 @@ jobs:
     name: Build & publish release artifacts
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       contents: write
     steps:
