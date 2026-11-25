@@ -7,7 +7,7 @@
 //==============================================================================
 // Waveform view with draggable Start/End trim handles for the
 // currently selected zone. Peaks are drawn straight from that zone's own
-// juce::AudioThumbnail (built once in loadZoneInternal), so switching zones
+// juce::AudioThumbnail (built once in installZone), so switching zones
 // or resizing never rescans sample data; a change listener on the thumbnail
 // repaints as it fills in progressively for freshly-added zones.
 class WaveformDisplay : public juce::Component,

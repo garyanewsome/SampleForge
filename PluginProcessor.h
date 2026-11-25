@@ -34,7 +34,7 @@ public:
     double sourceSampleRate = 44100.0;
     juce::String filePath;
 
-    // Built in loadZoneInternal() once the AudioFormatManager/AudioThumbnailCache
+    // Built in installZone() once the AudioFormatManager/AudioThumbnailCache
     // are available; draws and caches its own peak data independently of `data`,
     // so the editor never has to rescan samples itself.
     std::unique_ptr<juce::AudioThumbnail> thumbnail;
@@ -266,15 +266,27 @@ public:
     bool savePresetToFile(const juce::File& file);
     bool loadPresetFromFile(const juce::File& file);
 
-    // Decodes an audio file on the message thread and adds it as a new zone
-    // (full key/velocity range by default), selecting it. juce::Synthesiser
-    // guards addSound()/removeSound() with its own internal lock, so this is
-    // safe to call while the audio thread is mid-renderNextBlock.
+    // Asynchronous: queues the file to be decoded on a background thread and
+    // returns immediately. When decoding finishes (on the message thread) the
+    // new zone (full key/velocity range by default) is added and selected, and
+    // a change message is sent. Until then the existing zones keep playing
+    // untouched; the audio thread never waits on a decode. If the file cannot
+    // be decoded, nothing is added. Use waitForLoads() where a synchronous
+    // result is needed (tests, offline tools).
     //
     // If a zone is currently flagged missing and has this same file name, that
     // zone is relinked to the new file (keeping its key/velocity/trim settings)
     // instead of a duplicate being added.
     void addZoneFromFile(const juce::File& file);
+
+    // Loads still queued or decoding (addZoneFromFile, setStateInformation,
+    // loadPresetFromFile). Safe from any thread.
+    int getNumPendingLoads() const { return pendingLoads.load(); }
+    bool isLoading() const { return getNumPendingLoads() > 0; }
+
+    // MESSAGE THREAD ONLY: runs the message loop until every pending load has
+    // been applied, or the timeout (ms) passes. Returns true if none remain.
+    bool waitForLoads(int timeoutMs = 30000);
 
     // Removes a zone by index. Any voice currently playing it keeps it alive
     // via the base class's ref-counted currentlyPlayingSound until it finishes.
@@ -304,10 +316,33 @@ private:
     // Shared by addZoneFromFile() and the state-restore path used by both
     // setStateInformation() and loadPresetFromFile(), which supply the saved
     // key/vel/root/trim/reverse/pan/gain/rrGroup instead of these defaults.
-    bool loadZoneInternal(const juce::File& file, int keyLow, int keyHigh, int velLow, int velHigh,
-                          int rootNote, float sampleStart, float sampleEnd,
-                          bool reverse = false, float pan = 0.0f, float gain = 1.0f, int rrGroup = 0,
-                          bool keepIfMissing = false);
+    struct ZoneSettings
+    {
+        int keyLow = 0, keyHigh = 127, velLow = 0, velHigh = 127, rootNote = 60;
+        float sampleStart = 0.0f, sampleEnd = 1.0f, pan = 0.0f, gain = 1.0f;
+        bool reverse = false;
+        int rrGroup = 0;
+    };
+
+    // Decodes `file` into a new (not yet added) sound. Runs on the background
+    // thread. Returns null if the file can't be decoded and !keepIfMissing, or
+    // if `shouldAbort` returns true part-way through.
+    juce::ReferenceCountedObjectPtr<SampleForgeSound> decodeZone(const juce::File& file, const ZoneSettings& s,
+                                                                 bool keepIfMissing,
+                                                                 const std::function<bool()>& shouldAbort);
+
+    // Message thread: attaches the thumbnail and adds the sound to the synth.
+    void installZone(SampleForgeSound* sound);
+
+    struct RestoreEntry { juce::String path, relPath; ZoneSettings settings; };
+    void finishAddZone(juce::ReferenceCountedObjectPtr<SampleForgeSound> sound, int generation);
+    void finishRestore(std::vector<juce::ReferenceCountedObjectPtr<SampleForgeSound>> sounds, int generation);
+
+    std::atomic<bool> shuttingDown { false };
+    juce::ThreadPool loadPool { 1 };               // one thread: loads finish in request order
+    std::atomic<int> pendingLoads { 0 };
+    // Bumped by every state/preset restore; results of older requests are dropped.
+    std::atomic<int> loadGeneration { 0 };
 
     // Shared by getStateInformation()/savePresetToFile() and by
     // setStateInformation()/loadPresetFromFile() respectively — a "preset"
@@ -348,4 +383,5 @@ private:
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SampleForgeAudioProcessor)
+    JUCE_DECLARE_WEAK_REFERENCEABLE(SampleForgeAudioProcessor)
 };

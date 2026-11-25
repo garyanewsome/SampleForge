@@ -131,9 +131,9 @@ int snapshot(const juce::File& png, int page)
         return (float) (0.9 * std::exp(-t * 14.0) * (0.6 * std::sin(tau * 190.0 * t) + 0.9 * ((std::fmod(t * 7919.0, 1.0)) - 0.5))); });
 
     SampleForgeAudioProcessor proc;
-    proc.addZoneFromFile(pluck); proc.getZone(0)->keyLow = 28; proc.getZone(0)->keyHigh = 47; proc.getZone(0)->rootNote = 40; proc.getZone(0)->rrGroup = 1;
-    proc.addZoneFromFile(hit);   proc.getZone(1)->keyLow = 48; proc.getZone(1)->keyHigh = 59; proc.getZone(1)->rootNote = 54; proc.getZone(1)->velHigh = 90;
-    proc.addZoneFromFile(pad);   proc.getZone(2)->keyLow = 60; proc.getZone(2)->keyHigh = 83; proc.getZone(2)->rootNote = 60; proc.getZone(2)->sampleStart = 0.08f; proc.getZone(2)->sampleEnd = 0.86f;
+    proc.addZoneFromFile(pluck); proc.waitForLoads(); proc.getZone(0)->keyLow = 28; proc.getZone(0)->keyHigh = 47; proc.getZone(0)->rootNote = 40; proc.getZone(0)->rrGroup = 1;
+    proc.addZoneFromFile(hit); proc.waitForLoads();   proc.getZone(1)->keyLow = 48; proc.getZone(1)->keyHigh = 59; proc.getZone(1)->rootNote = 54; proc.getZone(1)->velHigh = 90;
+    proc.addZoneFromFile(pad); proc.waitForLoads();   proc.getZone(2)->keyLow = 60; proc.getZone(2)->keyHigh = 83; proc.getZone(2)->rootNote = 60; proc.getZone(2)->sampleStart = 0.08f; proc.getZone(2)->sampleEnd = 0.86f;
     proc.setSelectedZoneIndex(2);
     setParam(proc, "SUSTAIN", 0.7f); setParam(proc, "RELEASE", 0.8f); setParam(proc, "FILTER_CUTOFF", 4200.0f);
     setParam(proc, "FILTER_RESONANCE", 1.4f); setParam(proc, "FILTER_ENV_AMOUNT", 1.0f); setParam(proc, "STRETCH", 1.5f); setParam(proc, "LOOP_MODE", 1.0f);
@@ -179,8 +179,8 @@ int main(int argc, char** argv)
         auto soft = makeWav("soft.wav", 48000, 96000, 0, 330.0f);
         Rig r;
         setParam(r.proc, "LOOP_MODE", 1.0f);
-        r.proc.addZoneFromFile(loud);   // matches high velocity, added first
-        r.proc.addZoneFromFile(soft);   // matches low velocity, added second
+        r.proc.addZoneFromFile(loud); r.proc.waitForLoads();   // matches high velocity, added first
+        r.proc.addZoneFromFile(soft); r.proc.waitForLoads();   // matches low velocity, added second
         r.proc.getZone(0)->velLow = 64;
         r.proc.getZone(1)->velHigh = 63;
         std::vector<std::pair<int, float>> notes;
@@ -190,8 +190,8 @@ int main(int argc, char** argv)
 
         Rig q;
         setParam(q.proc, "LOOP_MODE", 1.0f);
-        q.proc.addZoneFromFile(loud);
-        q.proc.addZoneFromFile(soft);
+        q.proc.addZoneFromFile(loud); q.proc.waitForLoads();
+        q.proc.addZoneFromFile(soft); q.proc.waitForLoads();
         q.proc.getZone(0)->velLow = 64;
         q.proc.getZone(1)->velHigh = 63;
         auto lo = q.render(4, { { 60, 0.15f } });
@@ -205,7 +205,7 @@ int main(int argc, char** argv)
             auto f = makeWav("tone" + juce::String((int) fileRate) + ".wav", fileRate, (int) fileRate, 0, 440.0f);
             auto length = [&](float stretch) {
                 Rig r;
-                r.proc.addZoneFromFile(f);
+                r.proc.addZoneFromFile(f); r.proc.waitForLoads();
                 r.proc.getZone(0)->rootNote = 69;
                 setParam(r.proc, "STRETCH", stretch);
                 auto out = r.render(48000 * 4 / 256, { { 69, 1.0f } });
@@ -225,7 +225,7 @@ int main(int argc, char** argv)
         juce::MemoryBlock saved;
         {
             Rig r;
-            r.proc.addZoneFromFile(f);
+            r.proc.addZoneFromFile(f); r.proc.waitForLoads();
             r.proc.getZone(0)->keyLow = 40;
             r.proc.getZone(0)->rootNote = 50;
             r.proc.getZone(0)->rrGroup = 2;
@@ -235,7 +235,7 @@ int main(int argc, char** argv)
         f.moveFileTo(backup);
         {
             Rig r;
-            r.proc.setStateInformation(saved.getData(), (int) saved.getSize());
+            r.proc.setStateInformation(saved.getData(), (int) saved.getSize()); r.proc.waitForLoads();
             check(r.proc.getNumZones() == 1, "the zone survives the load");
             auto* z = r.proc.getZone(0);
             check(z != nullptr && z->missing, "it is flagged as missing");
@@ -245,7 +245,7 @@ int main(int argc, char** argv)
             r.proc.getStateInformation(again);
             backup.moveFileTo(f);
             Rig s;
-            s.proc.setStateInformation(again.getData(), (int) again.getSize());
+            s.proc.setStateInformation(again.getData(), (int) again.getSize()); s.proc.waitForLoads();
             auto* z2 = s.proc.getZone(0);
             check(z2 != nullptr && !z2->missing && z2->keyLow.load() == 40, "re-saved state restores fully once the file is back");
             check(peak(s.render(8, { { 50, 1.0f } })) > 0.01f, "and it plays again");
@@ -256,7 +256,7 @@ int main(int argc, char** argv)
         std::cout << "[4] One-shots fade out instead of ending on a hard cut\n";
         auto f = makeWav("dc.wav", 48000, 4800, 1, 0.5f);
         Rig r;
-        r.proc.addZoneFromFile(f);
+        r.proc.addZoneFromFile(f); r.proc.waitForLoads();
         setParam(r.proc, "ATTACK", 0.001f);
         auto out = r.render(40, { { 60, 1.0f } });
         int end = lengthAbove(out, 1.0e-5f);
@@ -271,8 +271,8 @@ int main(int argc, char** argv)
         auto a = makeWav("rr_a.wav", 48000, 2000, 1, 0.2f);
         auto b = makeWav("rr_b.wav", 48000, 2000, 1, 0.6f);
         Rig r;
-        r.proc.addZoneFromFile(a);
-        r.proc.addZoneFromFile(b);
+        r.proc.addZoneFromFile(a); r.proc.waitForLoads();
+        r.proc.addZoneFromFile(b); r.proc.waitForLoads();
         r.proc.getZone(0)->rrGroup = 1;
         r.proc.getZone(1)->rrGroup = 1;
         std::vector<float> peaks;
@@ -286,8 +286,8 @@ int main(int argc, char** argv)
         auto a = makeWav("ed_a.wav", 48000, 24000, 0, 440.0f);
         auto b = makeWav("ed_b.wav", 48000, 24000, 0, 330.0f);
         SampleForgeAudioProcessor proc;
-        proc.addZoneFromFile(a);
-        proc.addZoneFromFile(b);
+        proc.addZoneFromFile(a); proc.waitForLoads();
+        proc.addZoneFromFile(b); proc.waitForLoads();
         std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
         ed->setBounds(0, 0, 1280, 770);
         pumpMessages(100);
@@ -314,7 +314,7 @@ int main(int argc, char** argv)
         }
         auto biggestStep = [&](int loopMode) {
             Rig r;
-            r.proc.addZoneFromFile(f);
+            r.proc.addZoneFromFile(f); r.proc.waitForLoads();
             setParam(r.proc, "LOOP_MODE", (float) loopMode);
             setParam(r.proc, "ATTACK", 0.001f);
             auto out = r.render(60, { { 60, 1.0f } });
@@ -335,7 +335,7 @@ int main(int argc, char** argv)
         auto presetFile = dirA.getChildFile("kit.sfpreset");
         {
             Rig r;
-            r.proc.addZoneFromFile(wavA);
+            r.proc.addZoneFromFile(wavA); r.proc.waitForLoads();
             r.proc.getZone(0)->keyLow = 36;
             r.proc.getZone(0)->keyHigh = 48;
             check(r.proc.savePresetToFile(presetFile), "preset saved next to its sample");
@@ -343,23 +343,23 @@ int main(int argc, char** argv)
         dirA.moveFileTo(dirB);                                   // the whole folder moves
         {
             Rig r;
-            check(r.proc.loadPresetFromFile(dirB.getChildFile("kit.sfpreset")), "moved preset loads");
+            check(r.proc.loadPresetFromFile(dirB.getChildFile("kit.sfpreset")), "moved preset loads"); r.proc.waitForLoads();
             auto* z = r.proc.getZone(0);
             check(z != nullptr && !z->missing && z->keyLow.load() == 36, "its sample was found beside it");
         }
         // Relink: a missing zone adopts a dropped file of the same name and keeps its settings.
         {
             Rig r;
-            r.proc.addZoneFromFile(dirB.getChildFile("kick.wav"));
+            r.proc.addZoneFromFile(dirB.getChildFile("kick.wav")); r.proc.waitForLoads();
             r.proc.getZone(0)->keyLow = 30;
             juce::MemoryBlock st; r.proc.getStateInformation(st);
             auto moved = dirB.getChildFile("kick.wav").moveFileTo(tempDir().getChildFile("kick_elsewhere.wav"));
             Rig q;
-            q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            q.proc.setStateInformation(st.getData(), (int) st.getSize()); q.proc.waitForLoads();
             check(q.proc.getZone(0) != nullptr && q.proc.getZone(0)->missing, "with the file gone the zone is missing");
             auto back = dirB.getChildFile("kick.wav");
             tempDir().getChildFile("kick_elsewhere.wav").moveFileTo(back);
-            q.proc.addZoneFromFile(back);
+            q.proc.addZoneFromFile(back); q.proc.waitForLoads();
             check(q.proc.getNumZones() == 1 && !q.proc.getZone(0)->missing && q.proc.getZone(0)->keyLow.load() == 30,
                   "dropping the file relinks the same zone with its settings");
             (void) moved;
@@ -376,7 +376,7 @@ int main(int argc, char** argv)
         };
         auto run = [&](float range, int wheelBefore, int wheelAfter) {
             Rig r;
-            r.proc.addZoneFromFile(tone);
+            r.proc.addZoneFromFile(tone); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 69;
             setParam(r.proc, "BEND_RANGE", range);
             std::vector<std::pair<int, juce::MidiMessage>> extra;
@@ -424,7 +424,7 @@ int main(int argc, char** argv)
         };
         auto bursty = [&](float stretch, int loopMode) {
             Rig r;
-            r.proc.addZoneFromFile(bursts);
+            r.proc.addZoneFromFile(bursts); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 69;
             setParam(r.proc, "LOOP_MODE", (float) loopMode);
             setParam(r.proc, "STRETCH", stretch);
@@ -442,7 +442,7 @@ int main(int argc, char** argv)
         auto odd = makeWav("odd.wav", 48000, 22222, 0, 441.37f);
         auto step = [&](bool stretched) -> double {
             Rig r;
-            r.proc.addZoneFromFile(odd);
+            r.proc.addZoneFromFile(odd); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 69;
             setParam(r.proc, "LOOP_MODE", 1.0f);
             setParam(r.proc, "ATTACK", 0.001f);
@@ -470,7 +470,7 @@ int main(int argc, char** argv)
             w->writeFromAudioSampleBuffer(b, 0, 48000);
         }
         Rig rv;
-        rv.proc.addZoneFromFile(swell);
+        rv.proc.addZoneFromFile(swell); rv.proc.waitForLoads();
         rv.proc.getZone(0)->rootNote = 69;
         rv.proc.getZone(0)->reverse = true;
         setParam(rv.proc, "STRETCH", 2.0f);
@@ -608,7 +608,7 @@ int main(int argc, char** argv)
             return count;
         };
         auto setup = [&](Rig& r) {
-            r.proc.addZoneFromFile(hit);
+            r.proc.addZoneFromFile(hit); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 60;
             setParam(r.proc, "ARP_ON", 1.0f);
             setParam(r.proc, "ARP_RATE", 3.0f);      // 1/16
@@ -638,12 +638,97 @@ int main(int argc, char** argv)
             setParam(r.proc, "ARP_PATTERN", 2.0f); setParam(r.proc, "ARP_GATE", 0.8f); setParam(r.proc, "ARP_OCTAVES", 3.0f);
             juce::MemoryBlock st; r.proc.getStateInformation(st);
             Rig q;
-            q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            q.proc.setStateInformation(st.getData(), (int) st.getSize()); q.proc.waitForLoads();
             check(q.proc.apvts.getRawParameterValue("ARP_PATTERN")->load() == 2.0f
                   && q.proc.apvts.getRawParameterValue("ARP_OCTAVES")->load() == 3.0f
                   && std::abs(q.proc.apvts.getRawParameterValue("ARP_GATE")->load() - 0.8f) < 1e-4f
                   && q.proc.apvts.getRawParameterValue("ARP_ON")->load() > 0.5f,
                   "arp settings are saved with the session");
+        }
+    }
+
+    {
+        std::cout << "[13] Asynchronous sample loading\n";
+        auto big = makeWav("async_big.wav", 48000, 48000 * 60, 1, 0.5f);      // 60 s: slow enough to see
+        auto small = makeWav("async_small.wav", 48000, 4800, 1, 0.25f);
+        auto bad = tempDir().getChildFile("async_not_audio.wav");
+        bad.replaceWithText("this is not audio");
+
+        {   // addZoneFromFile returns before decoding finishes, and the audio thread is never blocked
+            Rig r;
+            r.proc.addZoneFromFile(small); r.proc.waitForLoads();
+            r.proc.getZone(0)->rootNote = 60;
+            setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
+            auto t0 = juce::Time::getMillisecondCounterHiRes();
+            r.proc.addZoneFromFile(big);
+            double callMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            check(callMs < 50.0, "addZoneFromFile returns immediately (" + juce::String(callMs, 1) + " ms)");
+            check(r.proc.isLoading() || r.proc.getNumZones() == 2, "a load is pending (or already finished)");
+            // keep rendering with the old zone while the big one decodes
+            float worstBlockMs = 0; int blocks = 0; bool sounded = false;
+            juce::AudioBuffer<float> buf(2, r.block);
+            while (r.proc.isLoading() && blocks < 20000)
+            {
+                buf.clear(); juce::MidiBuffer midi;
+                if (blocks % 50 == 0) midi.addEvent(juce::MidiMessage::noteOn(1, 60, 1.0f), 0);
+                auto b0 = juce::Time::getMillisecondCounterHiRes();
+                r.proc.processBlock(buf, midi);
+                worstBlockMs = std::max<float>(worstBlockMs, (float) (juce::Time::getMillisecondCounterHiRes() - b0));
+                if (buf.getMagnitude(0, 0, r.block) > 0.01f) sounded = true;
+                ++blocks;
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(1);
+            }
+            check(sounded, "the existing zone keeps sounding while the new one loads");
+            check(r.proc.waitForLoads() && r.proc.getNumZones() == 2, "the big file arrives as a second zone");
+            check(r.proc.getZone(1)->data.getNumSamples() == 48000 * 60, "decoded in full");
+            check(r.proc.getSelectedZoneIndex() == 1, "the new zone is selected");
+            std::cout << "        (worst block while loading: " << worstBlockMs << " ms over " << blocks << " blocks)\n";
+        }
+        {   // undecodable file adds nothing and does not wedge the loader
+            Rig r;
+            r.proc.addZoneFromFile(bad); r.proc.addZoneFromFile(small);
+            check(r.proc.waitForLoads(), "loads finish");
+            check(r.proc.getNumZones() == 1, "a bad file adds no zone but the next file still loads");
+        }
+        {   // repeated loads keep request order
+            Rig r;
+            r.proc.addZoneFromFile(big); r.proc.addZoneFromFile(small); r.proc.addZoneFromFile(small);
+            check(r.proc.waitForLoads() && r.proc.getNumZones() == 3, "three queued loads all land");
+            check(r.proc.getZone(0)->data.getNumSamples() == 48000 * 60 && r.proc.getZone(1)->data.getNumSamples() == 4800,
+                  "in the order requested");
+        }
+        {   // state restore is async; old zones play until the new set swaps in; a newer restore wins
+            Rig a; a.proc.addZoneFromFile(small); a.proc.waitForLoads(); a.proc.getZone(0)->keyLow = 20;
+            juce::MemoryBlock stSmall; a.proc.getStateInformation(stSmall);
+            Rig b; b.proc.addZoneFromFile(big); b.proc.addZoneFromFile(big); b.proc.waitForLoads(); b.proc.getZone(0)->keyLow = 30;
+            juce::MemoryBlock stBig; b.proc.getStateInformation(stBig);
+
+            Rig r;
+            r.proc.addZoneFromFile(small); r.proc.waitForLoads();
+            r.proc.setStateInformation(stBig.getData(), (int) stBig.getSize());
+            check(r.proc.getNumZones() == 1 && r.proc.getZone(0)->data.getNumSamples() == 4800,
+                  "setStateInformation returns with the old zones still in place");
+            r.proc.setStateInformation(stSmall.getData(), (int) stSmall.getSize());   // supersedes the big restore
+            check(r.proc.waitForLoads(), "restores finish");
+            check(r.proc.getNumZones() == 1 && r.proc.getZone(0)->keyLow.load() == 20 && r.proc.getZone(0)->data.getNumSamples() == 4800,
+                  "the latest restore wins; the superseded one is dropped");
+            // a load requested before a restore must not resurrect after it
+            r.proc.addZoneFromFile(small);
+            r.proc.setStateInformation(stSmall.getData(), (int) stSmall.getSize());
+            r.proc.waitForLoads();
+            check(r.proc.getNumZones() == 1, "an add requested before a restore is discarded by it");
+        }
+        {   // destroying the plugin mid-load is safe and prompt
+            auto t0 = juce::Time::getMillisecondCounterHiRes();
+            {
+                auto* p = new SampleForgeAudioProcessor();
+                p->addZoneFromFile(big); p->addZoneFromFile(big); p->addZoneFromFile(big);
+                juce::Thread::sleep(20);
+                delete p;
+            }
+            pumpMessages(300);                      // stale completion callbacks must find nothing
+            double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+            check(ms < 3000.0, "plugin destroyed mid-load without crash or long stall (" + juce::String(ms, 0) + " ms)");
         }
     }
 

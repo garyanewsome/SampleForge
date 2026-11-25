@@ -645,6 +645,10 @@ SampleForgeAudioProcessor::SampleForgeAudioProcessor()
 
 SampleForgeAudioProcessor::~SampleForgeAudioProcessor()
 {
+    // Stop in-flight decodes before any member (formatManager, synth, ...) is
+    // torn down; jobs poll shuttingDown between chunks, so this returns fast.
+    shuttingDown = true;
+    loadPool.removeAllJobs(true, 10000);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout SampleForgeAudioProcessor::createParameterLayout()
@@ -727,16 +731,32 @@ juce::AudioProcessorValueTreeState::ParameterLayout SampleForgeAudioProcessor::c
     return { params.begin(), params.end() };
 }
 
-bool SampleForgeAudioProcessor::loadZoneInternal(const juce::File& file, int keyLow, int keyHigh,
-                                                  int velLow, int velHigh, int rootNote,
-                                                  float sampleStart, float sampleEnd,
-                                                  bool reverse, float pan, float gain, int rrGroup,
-                                                  bool keepIfMissing)
+static void applySettings(SampleForgeSound& s, int keyLow, int keyHigh, int velLow, int velHigh, int rootNote,
+                          float sampleStart, float sampleEnd, bool reverse, float pan, float gain, int rrGroup)
 {
+    s.keyLow = keyLow;
+    s.keyHigh = keyHigh;
+    s.velLow = velLow;
+    s.velHigh = velHigh;
+    s.rootNote = rootNote;
+    s.sampleStart = sampleStart;
+    s.sampleEnd = sampleEnd;
+    s.reverse = reverse;
+    s.pan = pan;
+    s.gain = gain;
+    s.rrGroup = rrGroup;
+}
+
+juce::ReferenceCountedObjectPtr<SampleForgeSound>
+SampleForgeAudioProcessor::decodeZone(const juce::File& file, const ZoneSettings& s, bool keepIfMissing,
+                                      const std::function<bool()>& shouldAbort)
+{
+    // Runs on the loader thread: touches no processor state except formatManager
+    // (read-only after construction) and never the audio thread's data.
     std::unique_ptr<juce::AudioFormatReader> reader(file.existsAsFile() ? formatManager.createReaderFor(file) : nullptr);
 
     if (reader == nullptr && !keepIfMissing)
-        return false;
+        return nullptr;
 
     // A restored zone whose file has gone is kept as a silent placeholder, so
     // its settings survive a save and it comes back once the file reappears.
@@ -744,64 +764,123 @@ bool SampleForgeAudioProcessor::loadZoneInternal(const juce::File& file, int key
     double sourceRate = 44100.0;
     if (reader != nullptr)
     {
-        newBuffer.setSize(static_cast<int>(reader->numChannels), static_cast<int>(reader->lengthInSamples));
-        reader->read(&newBuffer, 0, static_cast<int>(reader->lengthInSamples), 0, true, true);
+        const int total = static_cast<int>(reader->lengthInSamples);
+        newBuffer.setSize(static_cast<int>(reader->numChannels), total);
+
+        // Chunked so a huge file can be abandoned promptly (new restore queued,
+        // or the plugin being destroyed).
+        constexpr int chunk = 1 << 16;
+        for (int pos = 0; pos < total; pos += chunk)
+        {
+            if (shouldAbort())
+                return nullptr;
+            reader->read(&newBuffer, pos, juce::jmin(chunk, total - pos), pos, true, true);
+        }
         sourceRate = reader->sampleRate;
     }
 
-    auto* newSound = new SampleForgeSound(std::move(newBuffer), sourceRate, file.getFullPathName());
-    newSound->missing = reader == nullptr;
-    newSound->keyLow = keyLow;
-    newSound->keyHigh = keyHigh;
-    newSound->velLow = velLow;
-    newSound->velHigh = velHigh;
-    newSound->rootNote = rootNote;
-    newSound->sampleStart = sampleStart;
-    newSound->sampleEnd = sampleEnd;
-    newSound->reverse = reverse;
-    newSound->pan = pan;
-    newSound->gain = gain;
-    newSound->rrGroup = rrGroup;
+    juce::ReferenceCountedObjectPtr<SampleForgeSound> sound(
+        new SampleForgeSound(std::move(newBuffer), sourceRate, file.getFullPathName()));
+    sound->missing = reader == nullptr;
+    applySettings(*sound, s.keyLow, s.keyHigh, s.velLow, s.velHigh, s.rootNote, s.sampleStart, s.sampleEnd,
+                  s.reverse, s.pan, s.gain, s.rrGroup);
+    return sound;
+}
 
+void SampleForgeAudioProcessor::installZone(SampleForgeSound* sound)
+{
     // Reads the file a second time in the background purely to build/cache
     // peak data for drawing; decoupled from the full in-RAM `data` buffer
     // used for playback, so the editor never has to rescan samples itself.
-    newSound->thumbnail = std::make_unique<juce::AudioThumbnail>(128, formatManager, thumbnailCache);
-    if (reader != nullptr)
-        newSound->thumbnail->setSource(new juce::FileInputSource(file));
+    sound->thumbnail = std::make_unique<juce::AudioThumbnail>(128, formatManager, thumbnailCache);
+    if (!sound->missing)
+        sound->thumbnail->setSource(new juce::FileInputSource(juce::File(sound->filePath)));
 
-    // juce::Synthesiser locks internally around addSound()/removeSound() and
-    // renderNextBlock(), so this is safe even if the audio thread is mid-block
-    // on another thread.
-    synth.addSound(newSound);
+    // The audio thread only ever sees a fully built sound: juce::Synthesiser
+    // takes its own lock around addSound()/removeSound()/renderNextBlock().
+    synth.addSound(sound);
     selectedZoneIndex = synth.getNumSounds() - 1;
-
-    return true;
 }
 
 void SampleForgeAudioProcessor::addZoneFromFile(const juce::File& file)
 {
+    ++pendingLoads;
+    const int generation = loadGeneration.load();
+    juce::WeakReference<SampleForgeAudioProcessor> weak(this);
+
+    loadPool.addJob([this, weak, file, generation]
+    {
+        juce::ReferenceCountedObjectPtr<SampleForgeSound> sound;
+        if (!shuttingDown.load())
+            sound = decodeZone(file, {}, false,
+                               [this, generation] { return shuttingDown.load() || loadGeneration.load() != generation; });
+
+        juce::MessageManager::callAsync([weak, sound, generation]() mutable
+        {
+            if (weak != nullptr)
+                weak->finishAddZone(sound, generation);
+        });
+    });
+}
+
+void SampleForgeAudioProcessor::finishAddZone(juce::ReferenceCountedObjectPtr<SampleForgeSound> sound, int generation)
+{
+    --pendingLoads;
+
+    // A newer state/preset restore replaced the whole zone list since this was
+    // requested; this result belongs to the old one.
+    if (sound == nullptr || generation != loadGeneration.load())
+    {
+        sendChangeMessage();
+        return;
+    }
+
+    const auto fileName = juce::File(sound->filePath).getFileName();
     for (int i = 0; i < synth.getNumSounds(); ++i)
     {
         auto* zone = getZone(i);
-        if (zone != nullptr && zone->missing && juce::File(zone->filePath).getFileName() == file.getFileName())
+        if (zone != nullptr && zone->missing && juce::File(zone->filePath).getFileName() == fileName)
         {
             // Relink: same settings, new file. The old placeholder is dropped.
-            if (loadZoneInternal(file, zone->keyLow.load(), zone->keyHigh.load(), zone->velLow.load(),
-                                 zone->velHigh.load(), zone->rootNote.load(), zone->sampleStart.load(),
-                                 zone->sampleEnd.load(), zone->reverse.load(), zone->pan.load(),
-                                 zone->gain.load(), zone->rrGroup.load()))
-            {
-                synth.removeSound(i);
-                selectedZoneIndex = synth.getNumSounds() - 1;
-                sendChangeMessage();
-            }
+            applySettings(*sound, zone->keyLow.load(), zone->keyHigh.load(), zone->velLow.load(),
+                          zone->velHigh.load(), zone->rootNote.load(), zone->sampleStart.load(),
+                          zone->sampleEnd.load(), zone->reverse.load(), zone->pan.load(),
+                          zone->gain.load(), zone->rrGroup.load());
+            installZone(sound.get());
+            synth.removeSound(i);
+            selectedZoneIndex = synth.getNumSounds() - 1;
+            sendChangeMessage();
             return;
         }
     }
 
-    if (loadZoneInternal(file, 0, 127, 0, 127, 60, 0.0f, 1.0f))
-        sendChangeMessage();
+    installZone(sound.get());
+    sendChangeMessage();
+}
+
+void SampleForgeAudioProcessor::finishRestore(std::vector<juce::ReferenceCountedObjectPtr<SampleForgeSound>> sounds,
+                                              int generation)
+{
+    --pendingLoads;
+
+    if (generation != loadGeneration.load())
+        return;                                   // superseded by a newer restore
+
+    // Everything is decoded; the old zones were playing until this instant.
+    synth.clearSounds();
+    selectedZoneIndex = -1;
+    for (auto& s : sounds)
+        installZone(s.get());
+    sendChangeMessage();
+}
+
+bool SampleForgeAudioProcessor::waitForLoads(int timeoutMs)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto end = juce::Time::getMillisecondCounter() + static_cast<juce::uint32>(timeoutMs);
+    while (pendingLoads.load() > 0 && juce::Time::getMillisecondCounter() < end)
+        juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+    return pendingLoads.load() == 0;
 }
 
 void SampleForgeAudioProcessor::removeZone(int index)
@@ -1023,20 +1102,51 @@ void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlS
 {
     apvts.replaceState(juce::ValueTree::fromXml(xmlState));
 
-    synth.clearSounds();
-    selectedZoneIndex = -1;
-
+    // Parse the zone list here (cheap), decode the audio on the loader thread.
+    // The current zones keep playing until the whole new set is ready.
+    auto entries = std::make_shared<std::vector<RestoreEntry>>();
     if (auto* zonesXml = xmlState.getChildByName("ZONES"))
     {
         for (auto* zoneXml = zonesXml->getChildByName("ZONE"); zoneXml != nullptr;
              zoneXml = zoneXml->getNextElementWithTagName("ZONE"))
         {
-            juce::File file(zoneXml->getStringAttribute("path"));
+            RestoreEntry e;
+            e.path = zoneXml->getStringAttribute("path");
+            e.relPath = zoneXml->getStringAttribute("relPath");
+            e.settings.keyLow = zoneXml->getIntAttribute("keyLow", 0);
+            e.settings.keyHigh = zoneXml->getIntAttribute("keyHigh", 127);
+            e.settings.velLow = zoneXml->getIntAttribute("velLow", 0);
+            e.settings.velHigh = zoneXml->getIntAttribute("velHigh", 127);
+            e.settings.rootNote = zoneXml->getIntAttribute("rootNote", 60);
+            e.settings.sampleStart = static_cast<float>(zoneXml->getDoubleAttribute("sampleStart", 0.0));
+            e.settings.sampleEnd = static_cast<float>(zoneXml->getDoubleAttribute("sampleEnd", 1.0));
+            e.settings.reverse = zoneXml->getBoolAttribute("reverse", false);
+            e.settings.pan = static_cast<float>(zoneXml->getDoubleAttribute("pan", 0.0));
+            e.settings.gain = static_cast<float>(zoneXml->getDoubleAttribute("gain", 1.0));
+            e.settings.rrGroup = zoneXml->getIntAttribute("rrGroup", 0);
+            entries->push_back(std::move(e));
+        }
+    }
+
+    ++pendingLoads;
+    const int generation = ++loadGeneration;      // invalidates any older queued/in-flight load
+    juce::WeakReference<SampleForgeAudioProcessor> weak(this);
+
+    loadPool.addJob([this, weak, entries, presetFolder, generation]
+    {
+        auto abort = [this, generation] { return shuttingDown.load() || loadGeneration.load() != generation; };
+        std::vector<juce::ReferenceCountedObjectPtr<SampleForgeSound>> sounds;
+
+        for (auto& e : *entries)
+        {
+            if (abort())
+                break;
+
+            juce::File file(e.path);
 
             if (!file.existsAsFile() && presetFolder != juce::File())
             {
-                auto relative = zoneXml->getStringAttribute("relPath");
-                auto beside = relative.isNotEmpty() ? presetFolder.getChildFile(relative) : juce::File();
+                auto beside = e.relPath.isNotEmpty() ? presetFolder.getChildFile(e.relPath) : juce::File();
                 auto sameFolder = presetFolder.getChildFile(file.getFileName());
                 if (beside.existsAsFile())
                     file = beside;
@@ -1044,23 +1154,16 @@ void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlS
                     file = sameFolder;
             }
 
-            loadZoneInternal(file,
-                              zoneXml->getIntAttribute("keyLow", 0),
-                              zoneXml->getIntAttribute("keyHigh", 127),
-                              zoneXml->getIntAttribute("velLow", 0),
-                              zoneXml->getIntAttribute("velHigh", 127),
-                              zoneXml->getIntAttribute("rootNote", 60),
-                              static_cast<float>(zoneXml->getDoubleAttribute("sampleStart", 0.0)),
-                              static_cast<float>(zoneXml->getDoubleAttribute("sampleEnd", 1.0)),
-                              zoneXml->getBoolAttribute("reverse", false),
-                              static_cast<float>(zoneXml->getDoubleAttribute("pan", 0.0)),
-                              static_cast<float>(zoneXml->getDoubleAttribute("gain", 1.0)),
-                              zoneXml->getIntAttribute("rrGroup", 0),
-                              true);
+            if (auto s = decodeZone(file, e.settings, true, abort))
+                sounds.push_back(std::move(s));
         }
-    }
 
-    sendChangeMessage();
+        juce::MessageManager::callAsync([weak, sounds = std::move(sounds), generation]() mutable
+        {
+            if (weak != nullptr)
+                weak->finishRestore(std::move(sounds), generation);
+        });
+    });
 }
 
 void SampleForgeAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
