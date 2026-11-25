@@ -328,8 +328,139 @@ void ArpDisplay::paint(juce::Graphics& g)
 }
 
 //==============================================================================
+ArpLaneEditor::ArpLaneEditor(SampleForgeAudioProcessor& p) : audioProcessor(p)
+{
+    startTimerHz(30);
+}
+
+ArpLaneEditor::~ArpLaneEditor()
+{
+    stopTimer();
+}
+
+void ArpLaneEditor::timerCallback()
+{
+    juce::uint32 sum = (juce::uint32) audioProcessor.arpNumSteps.load();
+    for (auto& s : audioProcessor.arpLane)
+        sum = sum * 31u + (juce::uint32) (s.velocity.load() * 1000.0f) + (juce::uint32) s.zone.load() * 7u
+              + (s.reverse.load() ? 3u : 0u) + (s.tie.load() ? 5u : 0u);
+    const int step = audioProcessor.getArpeggiator().displayStep.load();
+    if (step != lastStep || sum != lastSum)
+    {
+        lastStep = step; lastSum = sum;
+        repaint();
+    }
+}
+
+namespace
+{
+    constexpr int laneHeader = 16, laneRow = 18;
+}
+
+int ArpLaneEditor::columnAt(int x) const
+{
+    const float colW = (float) getWidth() / (float) arp::maxSteps;
+    return juce::jlimit(0, arp::maxSteps - 1, (int) ((float) x / colW));
+}
+
+void ArpLaneEditor::setVelocityFromY(int column, int y)
+{
+    const int top = laneHeader, bottom = getHeight() - 3 * laneRow;
+    const float v = 1.0f - (float) (y - top) / (float) juce::jmax(1, bottom - top);
+    audioProcessor.arpLane[(size_t) column].velocity = juce::jlimit(0.0f, 1.0f, std::round(v * 100.0f) / 100.0f);
+    repaint();
+}
+
+void ArpLaneEditor::mouseDown(const juce::MouseEvent& e)
+{
+    const int col = columnAt(e.x);
+    auto& step = audioProcessor.arpLane[(size_t) col];
+    const int rowsTop = getHeight() - 3 * laneRow;
+    dragColumn = -1;
+
+    if (e.y < laneHeader)
+        audioProcessor.arpNumSteps = col + 1;
+    else if (e.y < rowsTop)
+    {
+        dragColumn = col;
+        setVelocityFromY(col, e.y);
+    }
+    else if (e.y < rowsTop + laneRow)
+        step.tie = !step.tie.load();
+    else if (e.y < rowsTop + 2 * laneRow)
+        step.reverse = !step.reverse.load();
+    else
+    {
+        const int n = juce::jmax(1, audioProcessor.getNumZones());
+        const int dir = e.mods.isPopupMenu() ? -1 : 1;
+        step.zone = ((step.zone.load() + dir) % (n + 1) + (n + 1)) % (n + 1);
+    }
+    repaint();
+}
+
+void ArpLaneEditor::mouseDrag(const juce::MouseEvent& e)
+{
+    if (dragColumn >= 0)
+        setVelocityFromY(dragColumn, e.y);
+}
+
+void ArpLaneEditor::paint(juce::Graphics& g)
+{
+    using LAF = SampleForgeLookAndFeel;
+    auto bounds = getLocalBounds().toFloat();
+    g.setColour(juce::Colours::black);
+    g.fillRect(bounds);
+
+    const int numSteps = audioProcessor.arpNumSteps.load();
+    const int active = audioProcessor.getArpeggiator().displayStep.load();
+    const float colW = bounds.getWidth() / (float) arp::maxSteps;
+    const float barTop = (float) laneHeader, barBottom = bounds.getHeight() - 3.0f * laneRow;
+    const float rowsTop = barBottom;
+
+    for (int i = 0; i < arp::maxSteps; ++i)
+    {
+        const auto& s = audioProcessor.arpLane[(size_t) i];
+        const bool inLane = i < numSteps;
+        const float a = inLane ? 1.0f : 0.25f;
+        const float x = colW * (float) i;
+        auto cell = juce::Rectangle<float>(x + 2.0f, 0.0f, colW - 4.0f, bounds.getHeight());
+
+        if (i == active)
+        {
+            g.setColour(LAF::getAccentColour().withAlpha(0.12f));
+            g.fillRect(cell);
+        }
+
+        g.setFont(LAF::monoFont(9.0f));
+        g.setColour((i == active ? LAF::getTextColour() : LAF::getDimTextColour()).withAlpha(a));
+        g.drawText(juce::String(i + 1), cell.withHeight((float) laneHeader), juce::Justification::centred, false);
+
+        const float v = s.velocity.load();
+        const float h = (barBottom - barTop - 4.0f) * v;
+        g.setColour(LAF::getLineColour().withAlpha(a));
+        g.fillRect(cell.getX() + 3.0f, barTop, cell.getWidth() - 6.0f, barBottom - barTop - 2.0f);
+        g.setColour(LAF::getAccentColour().withAlpha((s.tie.load() ? 0.45f : 0.85f) * a));
+        g.fillRect(cell.getX() + 3.0f, barBottom - 2.0f - h, cell.getWidth() - 6.0f, h);
+
+        auto drawCell = [&](int row, const juce::String& text, bool on) {
+            auto r = juce::Rectangle<float>(cell.getX() + 3.0f, rowsTop + (float) (row * laneRow) + 1.0f, cell.getWidth() - 6.0f, (float) laneRow - 2.0f);
+            g.setColour(on ? LAF::getAccentColour().withAlpha(0.9f * a) : LAF::getLineColour().withAlpha(a));
+            on ? g.fillRect(r) : g.drawRect(r, 1.0f);
+            g.setColour(on ? juce::Colours::black : LAF::getDimTextColour().withAlpha(a));
+            g.setFont(LAF::monoFont(9.0f, on));
+            g.drawText(text, r, juce::Justification::centred, false);
+        };
+        drawCell(0, "T", s.tie.load());
+        drawCell(1, "R", s.reverse.load());
+        drawCell(2, s.zone.load() > 0 ? juce::String(s.zone.load()) : juce::String("-"), s.zone.load() > 0);
+    }
+
+    LAF::drawBrackets(g, bounds.reduced(1.5f), 14.0f, 1.5f, LAF::getAccentColour(), 0.0f);
+}
+
+//==============================================================================
 SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudioProcessor& p)
-    : AudioProcessorEditor(&p), audioProcessor(p), waveformDisplay(p), arpDisplay(p),
+    : AudioProcessorEditor(&p), audioProcessor(p), waveformDisplay(p), arpDisplay(p), arpLaneEditor(p),
       midiKeyboard(p.keyboardState, juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     setLookAndFeel(&lookAndFeel);
@@ -692,6 +823,7 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
     arpSwingSlider.valueFromTextFunction = [](const juce::String& t) { return t.getDoubleValue() / 100.0; };
     arpSwingSlider.updateText();
     addAndMakeVisible(arpDisplay);
+    addAndMakeVisible(arpLaneEditor);
 
     // Tabs and pages.
     auto setupTab = [this](juce::TextButton& b, const juce::String& text, int page)
@@ -718,7 +850,7 @@ SampleForgeAudioProcessorEditor::SampleForgeAudioProcessorEditor(SampleForgeAudi
                   &stretchSlider, &stretchLabel, &bendSlider, &bendLabel };
     arpPage = { &arpOnButton, &arpLatchButton, &arpPatternBox, &arpRateBox, &arpPatternLabel, &arpRateLabel,
                 &arpOctavesSlider, &arpGateSlider, &arpSwingSlider, &arpOctavesLabel, &arpGateLabel, &arpSwingLabel,
-                &arpDisplay };
+                &arpDisplay, &arpLaneEditor };
 
     addAndMakeVisible(midiKeyboard);
 
@@ -1072,5 +1204,8 @@ void SampleForgeAudioProcessorEditor::resized()
     layoutVerticalSlider(arpFaders, 96, arpSwingSlider, arpSwingLabel, 2);
 
     arpContent.removeFromLeft(14);
-    arpDisplay.setBounds(arpContent.withTrimmedTop(4));
+    auto arpRight = arpContent.withTrimmedTop(4);
+    arpLaneEditor.setBounds(arpRight.removeFromBottom(juce::jmin(130, arpRight.getHeight() / 2)));
+    arpRight.removeFromBottom(6);
+    arpDisplay.setBounds(arpRight);
 }

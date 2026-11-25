@@ -142,6 +142,8 @@ int snapshot(const juce::File& png, int page)
     {
         setParam(proc, "ARP_ON", 1.0f); setParam(proc, "ARP_PATTERN", 2.0f); setParam(proc, "ARP_RATE", 3.0f);
         setParam(proc, "ARP_OCTAVES", 2.0f); setParam(proc, "ARP_GATE", 0.7f); setParam(proc, "ARP_SWING", 0.3f);
+        proc.arpLane[1].velocity = 0.5f; proc.arpLane[2].tie = true; proc.arpLane[3].zone = 2; proc.arpLane[5].reverse = true; proc.arpLane[6].velocity = 0.7f;
+        proc.arpNumSteps = 12;
         for (int n : { 60, 64, 67, 71 }) proc.keyboardState.noteOn(1, n, 0.8f);
         proc.setPlayConfigDetails(0, 2, 48000.0, 512);
         proc.prepareToPlay(48000.0, 512);
@@ -164,6 +166,49 @@ int snapshot(const juce::File& png, int page)
     fmt.writeImageToStream(img, *out);
     std::cout << "wrote " << png.getFullPathName() << std::endl;
     return 0;
+}
+
+// FNV-1a over every note event an arp produces for a fixed scenario. The expected
+// values below were captured from the arpeggiator BEFORE the per-step lane existed.
+juce::uint64 arpGoldenHash(int scenario)
+{
+    using namespace arp;
+    Settings s; s.on = true;
+    s.gate = 0.55f; s.swing = 0.0f; s.octaves = 1; s.pattern = Up; s.rate = 3; s.latch = false;
+    int block = 512; double bpm = 120.0;
+    struct Ev { int pos; int note; bool on; };
+    std::vector<Ev> input { { 0, 64, true }, { 0, 60, true }, { 0, 67, true }, { 5000, 71, true }, { 30000, 64, false }, { 52000, 60, false }, { 60000, 71, false } };
+    switch (scenario)
+    {
+        case 0: break;
+        case 1: s.pattern = Down; s.octaves = 2; break;
+        case 2: s.pattern = UpDown; s.swing = 0.4f; s.gate = 1.0f; break;
+        case 3: s.pattern = DownUp; s.rate = 4; s.octaves = 3; bpm = 97.0; block = 64; break;
+        case 4: s.pattern = AsPlayed; s.rate = 1; s.gate = 0.1f; block = 2048; break;
+        case 5: s.pattern = arp::Random; s.octaves = 2; break;
+        case 6: s.latch = true; s.swing = 1.0f; break;
+        default: break;
+    }
+    Arpeggiator a; a.reset();
+    juce::MidiBuffer in, out;
+    juce::uint64 h = 1469598103934665603ull;
+    auto mix = [&](juce::uint64 v) { h ^= v; h *= 1099511628211ull; };
+    for (int start = 0; start < 96000; start += block)
+    {
+        in.clear();
+        for (auto& e : input)
+            if (e.pos >= start && e.pos < start + block)
+                in.addEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, 0.8f) : juce::MidiMessage::noteOff(1, e.note), e.pos - start);
+        a.process(in, out, block, 48000.0, s, bpm, false, -1.0);
+        for (const auto meta : out)
+        {
+            auto m = meta.getMessage();
+            mix((juce::uint64) (start + meta.samplePosition));
+            mix((juce::uint64) m.getNoteNumber());
+            mix((juce::uint64) (m.isNoteOn() ? m.getVelocity() + 1000 : 1));
+        }
+    }
+    return h;
 }
 
 int main(int argc, char** argv)
@@ -729,6 +774,174 @@ int main(int argc, char** argv)
             pumpMessages(300);                      // stale completion callbacks must find nothing
             double ms = juce::Time::getMillisecondCounterHiRes() - t0;
             check(ms < 3000.0, "plugin destroyed mid-load without crash or long stall (" + juce::String(ms, 0) + " ms)");
+        }
+    }
+
+    {
+        std::cout << "[14] Arpeggiator per-step lane: velocity, ties, zone, reverse\n";
+        using namespace arp;
+        struct Ev { int pos; int note; bool on; int vel; };
+        auto runArp = [](const Settings& s, const std::vector<Ev>& input, int totalSamples, int block, std::vector<NoteTag>* tags = nullptr) {
+            Arpeggiator a; a.reset();
+            std::vector<Ev> result;
+            juce::MidiBuffer in, out;
+            for (int start = 0; start < totalSamples; start += block)
+            {
+                in.clear();
+                for (auto& e : input)
+                    if (e.pos >= start && e.pos < start + block)
+                        in.addEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, 0.8f) : juce::MidiMessage::noteOff(1, e.note), e.pos - start);
+                a.process(in, out, block, 48000.0, s, 120.0, false, -1.0);
+                if (tags != nullptr)
+                    for (int i = 0; i < a.numTags(); ++i) tags->push_back(a.tag(i));
+                for (const auto meta : out)
+                {
+                    auto m = meta.getMessage();
+                    if (m.isNoteOnOrOff()) result.push_back({ start + meta.samplePosition, m.getNoteNumber(), m.isNoteOn(), m.getVelocity() });
+                }
+            }
+            return result;
+        };
+        auto ons = [](const std::vector<Ev>& v) { std::vector<Ev> r; for (auto& e : v) if (e.on) r.push_back(e); return r; };
+        auto offs = [](const std::vector<Ev>& v) { std::vector<Ev> r; for (auto& e : v) if (!e.on) r.push_back(e); return r; };
+        const int step16 = 6000;
+        const std::vector<Ev> chord { { 0, 60, true, 0 }, { 0, 64, true, 0 }, { 0, 67, true, 0 } };
+
+        // Defaults reproduce the pre-lane output bit for bit (hashes captured from the old engine).
+        const juce::uint64 golden[] = { 6359035928952968032ull, 4198607907181958900ull, 7206125683372040994ull, 15298489760740847329ull,
+                                        14739403644682878734ull, 15027483251730415700ull, 1153527310852296291ull };
+        for (int i = 0; i < 7; ++i)
+            check(arpGoldenHash(i) == golden[i], "default lane reproduces the old arp output exactly (scenario " + juce::String(i) + ")");
+
+        Settings s; s.on = true; s.gate = 0.5f;
+
+        // Velocity: scales the played velocity (0.8 -> 102 at 1.0).
+        {
+            auto t = s; t.numSteps = 2; t.steps[1].velocity = 0.5f;
+            auto o = ons(runArp(t, chord, step16 * 4, 512));
+            check(o.size() >= 4 && o[0].vel == 102 && o[2].vel == 102, "step velocity 1.0 plays the key velocity as played");
+            check(o.size() >= 4 && std::abs(o[1].vel - 51) <= 1 && std::abs(o[3].vel - 51) <= 1, "step velocity 0.5 halves it (" + juce::String(o.size() > 1 ? o[1].vel : -1) + ")");
+            auto z = s; z.numSteps = 1; z.steps[0].velocity = 0.0f;
+            auto zo = ons(runArp(z, chord, step16 * 2, 512));
+            check(!zo.empty() && zo[0].vel >= 1, "velocity 0 still plays a note (never becomes a note-off)");
+        }
+
+        // Tie: step 1 holds step 0's note; no retrigger, pitch does not advance.
+        {
+            auto t = s; t.numSteps = 4; t.steps[1].tie = true;
+            auto ev = runArp(t, chord, step16 * 8, 512);
+            auto o = ons(ev), f = offs(ev);
+            check(o.size() >= 5 && o[0].note == 60 && o[1].note == 64 && o[2].note == 67 && o[3].note == 60,
+                  "a tied step plays no note and the pitch sequence does not advance");
+            check(o.size() >= 3 && o[0].pos == 0 && std::abs(o[1].pos - 2 * step16) <= 1 && std::abs(o[2].pos - 3 * step16) <= 1,
+                  "after a tie the next note lands on its normal grid step");
+            check(!f.empty() && f[0].note == 60 && std::abs(f[0].pos - (step16 + step16 / 2)) <= 1,
+                  "the held note ends at the tied step's gate (" + juce::String(f.empty() ? -1 : f[0].pos) + ", expected 9000)");
+            check(f.size() >= 2 && std::abs(f[1].pos - (2 * step16 + step16 / 2)) <= 1, "untied notes keep their normal gate");
+        }
+        // Two ties in a row hold across both steps.
+        {
+            auto t = s; t.numSteps = 4; t.steps[1].tie = true; t.steps[2].tie = true;
+            auto ev = runArp(t, chord, step16 * 6, 512);
+            auto f = offs(ev);
+            check(!f.empty() && f[0].note == 60 && std::abs(f[0].pos - (2 * step16 + step16 / 2)) <= 1, "chained ties hold the note through every tied step");
+        }
+        // A tie with nothing sounding (first step of the run) just plays a note.
+        {
+            auto t = s; t.numSteps = 4; t.steps[0].tie = true;
+            auto o = ons(runArp(t, chord, step16 * 3, 512));
+            check(!o.empty() && o[0].pos == 0 && o[0].note == 60, "a tie on the very first step still sounds");
+        }
+        // Ties are block-size independent and never leave a stuck note after release.
+        {
+            auto t = s; t.numSteps = 4; t.steps[1].tie = true; t.steps[3].tie = true;
+            auto a = runArp(t, chord, step16 * 9, 64), b = runArp(t, chord, step16 * 9, 2048);
+            bool same = a.size() == b.size();
+            for (size_t i = 0; same && i < a.size(); ++i) same = a[i].pos == b[i].pos && a[i].note == b[i].note && a[i].on == b[i].on;
+            check(same, "tied output is identical at 64 and 2048 samples per block");
+            auto in = chord; in.push_back({ step16 + 100, 60, false, 0 }); in.push_back({ step16 + 100, 64, false, 0 }); in.push_back({ step16 + 100, 67, false, 0 });
+            auto ev = runArp(t, in, step16 * 4, 512);
+            int on = 0; for (auto& e : ev) on += e.on ? 1 : -1;
+            check(on == 0 && !ev.empty() && !ev.back().on, "releasing the keys during a tie ends the held note");
+        }
+
+        // Tags: zone / reverse requests are emitted per note-on, only when asked for.
+        {
+            auto t = s; t.numSteps = 3; t.steps[1].zone = 2; t.steps[2].reverse = true;
+            std::vector<NoteTag> tags;
+            runArp(t, chord, step16 * 3, 512, &tags);
+            check(tags.size() == 2 && tags[0].note == 64 && tags[0].zone == 2 && !tags[0].reverse
+                  && tags[1].note == 67 && tags[1].zone == 0 && tags[1].reverse, "only steps that ask for a zone or reverse produce tags, with the note they belong to");
+            std::vector<NoteTag> none;
+            runArp(s, chord, step16 * 3, 512, &none);
+            check(none.empty(), "default lane produces no tags");
+        }
+    }
+
+    {
+        std::cout << "[15] Per-step lane inside the plugin\n";
+        auto low = makeWav("lane_low.wav", 48000, 4000, 1, 0.2f);
+        auto high = makeWav("lane_high.wav", 48000, 4000, 1, 0.6f);
+        // A rising ramp: forward it starts near silence, reversed it starts loud.
+        auto ramp = tempDir().getChildFile("lane_ramp.wav");
+        {
+            ramp.deleteFile();
+            juce::AudioBuffer<float> b(2, 4800);
+            for (int i = 0; i < 4800; ++i) { b.setSample(0, i, 0.8f * i / 4800.0f); b.setSample(1, i, 0.8f * i / 4800.0f); }
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::FileOutputStream> out(ramp.createOutputStream());
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(out.get(), 48000.0, 2, 24, {}, 0));
+            out.release();
+            w->writeFromAudioSampleBuffer(b, 0, 4800);
+        }
+        auto setupZones = [&](Rig& r) {
+            r.proc.addZoneFromFile(low);  r.proc.getZone(0)->keyLow = 0;  r.proc.getZone(0)->keyHigh = 59;  r.proc.getZone(0)->rootNote = 60;
+            r.proc.addZoneFromFile(high); r.proc.getZone(1)->keyLow = 60; r.proc.getZone(1)->keyHigh = 127; r.proc.getZone(1)->rootNote = 60;
+            setParam(r.proc, "ARP_ON", 1.0f); setParam(r.proc, "ARP_RATE", 1.0f);
+            setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
+        };
+        auto firstHit = [&](Rig& r) { auto o = r.render(20, { { 60, 1.0f } }); o.resize(2000); return peak(o); };
+
+        { Rig r; setupZones(r); float p = firstHit(r); check(p > 0.3f, "no lane: note 60 plays the zone whose key range holds it (peak " + juce::String(p, 2) + ")"); }
+        { Rig r; setupZones(r); r.proc.arpLane[0].zone = 1; float p = firstHit(r);
+          check(p > 0.05f && p < 0.3f, "lane zone 1 plays the first zone even though note 60 is outside its key range (peak " + juce::String(p, 2) + ")"); }
+        { Rig r; setupZones(r); r.proc.arpLane[0].zone = 2; float p = firstHit(r); check(p > 0.3f, "lane zone 2 plays only the second zone"); }
+        { Rig r; setupZones(r); r.proc.arpLane[0].zone = 9; float p = firstHit(r); check(p > 0.3f, "a zone number beyond the zone count falls back to normal routing"); }
+        {   // The forced zone must not leak into later hits: step 1 is back to normal routing.
+            Rig r; setupZones(r); r.proc.arpNumSteps = 2; r.proc.arpLane[0].zone = 1;
+            auto o = r.render(60, { { 60, 1.0f } });   // 1/8 at 120 BPM = 12000 samples a step
+            std::vector<float> a(o.begin(), o.begin() + 2000), b(o.begin() + 12000, o.begin() + 14000);
+            check(peak(a) < 0.3f && peak(b) > 0.3f, "a step's zone choice does not stick to the next step");
+        }
+
+        auto rampRig = [&](Rig& r) {
+            r.proc.addZoneFromFile(ramp); r.proc.getZone(0)->rootNote = 60;
+            setParam(r.proc, "ARP_ON", 1.0f); setParam(r.proc, "ARP_RATE", 1.0f);
+            setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
+        };
+        auto early = [&](Rig& r) { auto o = r.render(10, { { 60, 1.0f } }); float s = 0; for (int i = 100; i < 300; ++i) s += std::abs(o[(size_t) i]); return s / 200.0f; };
+        { Rig r; rampRig(r); float e = early(r); check(e < 0.1f, "forward ramp starts quietly (" + juce::String(e, 3) + ")"); }
+        { Rig r; rampRig(r); r.proc.arpLane[0].reverse = true; float e = early(r); check(e > 0.25f, "a reversed step plays the sample backwards (" + juce::String(e, 3) + ")"); }
+        { Rig r; rampRig(r); r.proc.getZone(0)->reverse = true; r.proc.arpLane[0].reverse = true; float e = early(r);
+          check(e < 0.1f, "a reversed step on an already-reversed zone flips it back to forwards"); }
+        { Rig r; rampRig(r); r.proc.getZone(0)->reverse = true; float e = early(r); check(e > 0.25f, "zone Reverse alone is unchanged by the lane"); }
+
+        // State.
+        {
+            Rig r; setupZones(r);
+            juce::MemoryBlock plain; r.proc.getStateInformation(plain);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(plain.getData(), (int) plain.getSize());
+            check(xml != nullptr && xml->getChildByName("ARPLANE") == nullptr, "an untouched lane adds nothing to the saved state");
+
+            r.proc.arpNumSteps = 5; r.proc.arpLane[2].tie = true; r.proc.arpLane[3].zone = 2; r.proc.arpLane[4].reverse = true; r.proc.arpLane[1].velocity = 0.25f;
+            juce::MemoryBlock st; r.proc.getStateInformation(st);
+            Rig q; q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            check(q.proc.arpNumSteps == 5 && q.proc.arpLane[2].tie && q.proc.arpLane[3].zone == 2 && q.proc.arpLane[4].reverse
+                  && std::abs(q.proc.arpLane[1].velocity.load() - 0.25f) < 1e-4f && !q.proc.arpLane[0].tie, "the lane is saved and restored with the session");
+
+            q.proc.setStateInformation(plain.getData(), (int) plain.getSize());
+            check(q.proc.arpNumSteps == 16 && !q.proc.arpLane[2].tie && q.proc.arpLane[3].zone == 0 && q.proc.arpLane[1].velocity == 1.0f,
+                  "state saved without a lane (older sessions) restores the default lane");
         }
     }
 

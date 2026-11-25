@@ -26,6 +26,10 @@ public:
         if (rrSuppressed.load() || velSuppressed.load())
             return false;
 
+        // The arp lane picked this zone for the hit: it plays whatever the key.
+        if (arpForced.load())
+            return true;
+
         return midiNoteNumber >= keyLow.load() && midiNoteNumber <= keyHigh.load();
     }
     bool appliesToChannel(int) override { return true; }
@@ -65,6 +69,12 @@ public:
     // startNote) matters: juce::Synthesiser grabs - and if need be steals - a
     // voice for every sound appliesToNote() accepts, before startNote runs.
     std::atomic<bool> velSuppressed { false };
+
+    // Set by SampleForgeSynthesiser::noteOn() for the hit being started, from the
+    // arpeggiator's per-step lane: arpForced plays this zone regardless of its
+    // key/velocity range, arpFlipReverse inverts its Reverse setting for the hit.
+    std::atomic<bool> arpForced { false };
+    std::atomic<bool> arpFlipReverse { false };
 
     // True when the file could not be found/decoded on restore. The zone keeps
     // its path and settings (so saving again doesn't lose them) but is silent.
@@ -209,13 +219,32 @@ public:
 
     std::atomic<float>* rrOrderParam = nullptr;
 
+    // Call just before renderNextBlock() with the arp that produced this block's
+    // MIDI. Its tags (per-step zone / reverse) are matched to note-ons by note
+    // number, in order; note-ons without a tag route normally.
+    void setArpTagSource(const arp::Arpeggiator* a) { tagSource = a; tagsUsed.reset(); }
+
 private:
     static constexpr int maxRRGroups = 16;
     static constexpr int maxGroupMembers = 16;
 
     // Fixed-size, no heap allocation: noteOn() runs on the audio thread.
     int rrNextIndex[maxRRGroups] = {};
+    const arp::Arpeggiator* tagSource = nullptr;
+    std::bitset<arp::Arpeggiator::maxTags> tagsUsed;
     juce::Random random;
+};
+
+//==============================================================================
+// One entry of the arpeggiator's per-step lane as edited in the UI. Plain
+// atomics so the editor can write while the audio thread reads. Defaults are
+// "do nothing", i.e. the arp behaves as it did before the lane existed.
+struct ArpLaneStep
+{
+    std::atomic<float> velocity { 1.0f };
+    std::atomic<int> zone { 0 };
+    std::atomic<bool> reverse { false };
+    std::atomic<bool> tie { false };
 };
 
 //==============================================================================
@@ -310,6 +339,11 @@ public:
     // Exposes the arpeggiator's display state to the editor.
     const arp::Arpeggiator& getArpeggiator() const { return arpeggiator; }
 
+    // Per-step lane (velocity / zone / reverse / tie), saved with the state.
+    std::array<ArpLaneStep, arp::maxSteps> arpLane;
+    std::atomic<int> arpNumSteps { arp::maxSteps };
+    void resetArpLane();
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
@@ -373,6 +407,9 @@ private:
     std::atomic<float>* arpGate = nullptr;
     std::atomic<float>* arpSwing = nullptr;
     std::atomic<float>* arpLatch = nullptr;
+
+    void appendArpLaneXml(juce::XmlElement& xml) const;
+    void restoreArpLaneXml(const juce::XmlElement& xml);
 
     int selectedZoneIndex = -1;
 
