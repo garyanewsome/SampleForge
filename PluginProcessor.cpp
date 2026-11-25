@@ -914,7 +914,16 @@ bool SampleForgeAudioProcessor::waitForLoads(int timeoutMs)
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
     const auto end = juce::Time::getMillisecondCounter() + static_cast<juce::uint32>(timeoutMs);
     while (pendingLoads.load() > 0 && juce::Time::getMillisecondCounter() < end)
+    {
+#if JUCE_MODAL_LOOPS_PERMITTED
         juce::MessageManager::getInstance()->runDispatchLoopUntil(5);
+#else
+        // The shipped plugin build does not allow modal loops (a host owns the
+        // message loop), so completions cannot be pumped from here. This only
+        // works in the test build; in a plugin it just times out.
+        juce::Thread::sleep(5);
+#endif
+    }
     return pendingLoads.load() == 0;
 }
 
