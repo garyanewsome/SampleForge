@@ -32,7 +32,8 @@ void SampleForgeVoice::startNote(int midiNoteNumber, float velocity, juce::Synth
     // map narrows this; SynthesiserSound has no velocity hook of its own, so
     // this has to be checked here rather than in appliesToNote().
     int velocityByte = juce::roundToInt(velocity * 127.0f);
-    if (velocityByte < currentSound->velLow.load() || velocityByte > currentSound->velHigh.load())
+    if (!currentSound->arpForced.load()
+        && (velocityByte < currentSound->velLow.load() || velocityByte > currentSound->velHigh.load()))
     {
         clearCurrentNote();
         return;
@@ -63,7 +64,7 @@ void SampleForgeVoice::startNote(int midiNoteNumber, float velocity, juce::Synth
     startSampleInSource = startFrac * sourceLength;
     endSampleInSource = endFrac * sourceLength;
 
-    bool reversed = currentSound->reverse.load();
+    bool reversed = currentSound->reverse.load() != currentSound->arpFlipReverse.load();
     loopDirection = reversed ? -1 : 1;
     sourcePosition = reversed ? endSampleInSource : startSampleInSource;
 
@@ -560,6 +561,8 @@ void SampleForgeSynthesiser::noteOn(int midiChannel, int midiNoteNumber, float v
         if (auto* zone = dynamic_cast<SampleForgeSound*>(getSound(i).get()))
         {
             zone->rrSuppressed = false;
+            zone->arpForced = false;
+            zone->arpFlipReverse = false;
             zone->velSuppressed = velocityByte < zone->velLow.load() || velocityByte > zone->velHigh.load();
         }
 
@@ -600,6 +603,38 @@ void SampleForgeSynthesiser::noteOn(int midiChannel, int midiNoteNumber, float v
         for (int i = 0; i < count; ++i)
             if (i != winner)
                 groupMembers[group][i]->rrSuppressed = true;
+    }
+
+    // Arpeggiator lane: this hit may ask for one particular zone and/or a flipped
+    // Reverse. A zone number beyond the current zone count is ignored (normal routing).
+    if (tagSource != nullptr)
+    {
+        const arp::NoteTag* tag = nullptr;
+        for (int i = 0; i < tagSource->numTags(); ++i)
+            if (!tagsUsed[(size_t) i] && tagSource->tag(i).note == midiNoteNumber)
+            {
+                tagsUsed.set((size_t) i);
+                tag = &tagSource->tag(i);
+                break;
+            }
+
+        if (tag != nullptr)
+        {
+            const int wanted = tag->zone - 1;
+            const bool validZone = wanted >= 0 && wanted < getNumSounds();
+            for (int i = 0; i < getNumSounds(); ++i)
+                if (auto* zone = dynamic_cast<SampleForgeSound*>(getSound(i).get()))
+                {
+                    if (validZone)
+                    {
+                        const bool chosen = (i == wanted);
+                        zone->rrSuppressed = !chosen;
+                        zone->velSuppressed = false;
+                        zone->arpForced = chosen;
+                    }
+                    zone->arpFlipReverse = tag->reverse;
+                }
+        }
     }
 
     Synthesiser::noteOn(midiChannel, midiNoteNumber, velocity);
@@ -956,6 +991,14 @@ void SampleForgeAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
         st.gate = arpGate->load();
         st.swing = arpSwing->load();
         st.latch = arpLatch->load() > 0.5f;
+        st.numSteps = juce::jlimit(1, arp::maxSteps, arpNumSteps.load());
+        for (size_t i = 0; i < arpLane.size(); ++i)
+        {
+            st.steps[i].velocity = arpLane[i].velocity.load();
+            st.steps[i].zone = arpLane[i].zone.load();
+            st.steps[i].reverse = arpLane[i].reverse.load();
+            st.steps[i].tie = arpLane[i].tie.load();
+        }
 
         bool hostPlaying = false;
         double hostPpq = -1.0;
@@ -973,6 +1016,7 @@ void SampleForgeAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, j
     }
 
     // Render the active synth voices
+    synth.setArpTagSource(&arpeggiator);
     synth.renderNextBlock(buffer, midiMessages, 0, buffer.getNumSamples());
 }
 
@@ -1016,12 +1060,63 @@ std::unique_ptr<juce::XmlElement> SampleForgeAudioProcessor::buildStateXml(const
         }
     }
 
+    appendArpLaneXml(*xml);
     return xml;
+}
+
+// Only written when it differs from the default, so sessions that never touch the
+// lane save exactly what they saved before; a missing element loads as defaults.
+void SampleForgeAudioProcessor::appendArpLaneXml(juce::XmlElement& xml) const
+{
+    bool custom = arpNumSteps.load() != arp::maxSteps;
+    for (auto& s : arpLane)
+        custom |= s.velocity.load() != 1.0f || s.zone.load() != 0 || s.reverse.load() || s.tie.load();
+    if (!custom)
+        return;
+
+    auto* lane = xml.createNewChildElement("ARPLANE");
+    lane->setAttribute("numSteps", arpNumSteps.load());
+    for (auto& s : arpLane)
+    {
+        auto* step = lane->createNewChildElement("STEP");
+        step->setAttribute("velocity", static_cast<double>(s.velocity.load()));
+        step->setAttribute("zone", s.zone.load());
+        step->setAttribute("reverse", s.reverse.load());
+        step->setAttribute("tie", s.tie.load());
+    }
+}
+
+void SampleForgeAudioProcessor::resetArpLane()
+{
+    arpNumSteps = arp::maxSteps;
+    for (auto& s : arpLane)
+    {
+        s.velocity = 1.0f; s.zone = 0; s.reverse = false; s.tie = false;
+    }
+}
+
+void SampleForgeAudioProcessor::restoreArpLaneXml(const juce::XmlElement& xml)
+{
+    resetArpLane();
+    if (auto* lane = xml.getChildByName("ARPLANE"))
+    {
+        arpNumSteps = juce::jlimit(1, arp::maxSteps, lane->getIntAttribute("numSteps", arp::maxSteps));
+        size_t i = 0;
+        for (auto* step = lane->getChildByName("STEP"); step != nullptr && i < arpLane.size();
+             step = step->getNextElementWithTagName("STEP"), ++i)
+        {
+            arpLane[i].velocity = juce::jlimit(0.0f, 1.0f, static_cast<float>(step->getDoubleAttribute("velocity", 1.0)));
+            arpLane[i].zone = juce::jlimit(0, 64, step->getIntAttribute("zone", 0));
+            arpLane[i].reverse = step->getBoolAttribute("reverse", false);
+            arpLane[i].tie = step->getBoolAttribute("tie", false);
+        }
+    }
 }
 
 void SampleForgeAudioProcessor::restoreStateFromXml(const juce::XmlElement& xmlState, const juce::File& presetFolder)
 {
     apvts.replaceState(juce::ValueTree::fromXml(xmlState));
+    restoreArpLaneXml(xmlState);
 
     synth.clearSounds();
     selectedZoneIndex = -1;

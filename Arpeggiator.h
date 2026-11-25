@@ -33,6 +33,23 @@ namespace arp
         return beats[juce::jlimit(0, 5, index)];
     }
 
+    // Per-step lane. The arp's step counter (1 per arp tick, from the moment the
+    // arp starts running) picks entry `counter % numSteps`; it is independent of
+    // which pitch is playing. The defaults leave the arp exactly as it was before
+    // the lane existed.
+    inline constexpr int maxSteps = 16;
+    struct Step
+    {
+        float velocity = 1.0f; // 0..1, multiplies the played velocity (1 = as played)
+        int zone = 0;          // 0 = normal key/velocity routing, n = play only zone n (1-based)
+        bool reverse = false;  // flip the zone's own Reverse setting for this hit
+        bool tie = false;      // hold the previous note into this step instead of retriggering
+    };
+
+    // Per-note-on instruction for the sampler (see SampleForgeSynthesiser::noteOn).
+    // Only emitted for steps that ask for a zone or a reversal.
+    struct NoteTag { int note = 0; int zone = 0; bool reverse = false; };
+
     struct Settings
     {
         bool on = false;
@@ -42,6 +59,8 @@ namespace arp
         float gate = 0.6f;     // fraction of a step the note is held
         float swing = 0.0f;    // 0..1: delays every second step by up to half a step
         bool latch = false;    // keep playing after the keys are released
+        int numSteps = maxSteps;                // 1..maxSteps: length of the per-step lane
+        std::array<Step, maxSteps> steps {};
     };
 
     class Arpeggiator
@@ -55,6 +74,13 @@ namespace arp
         std::atomic<int> displayLength { 0 };
         std::atomic<int> displayIndex { -1 };
         std::atomic<int> displayNotes[displayCap];
+
+        // Tags for the note-ons in the buffer filled by the latest process() call,
+        // in the order they were emitted. Cleared at the start of each call.
+        static constexpr int maxTags = 512;
+        int numTags() const { return tagCount; }
+        const NoteTag& tag(int i) const { return tags[(size_t) i]; }
+        std::atomic<int> displayStep { -1 };   // lane position of the step that last sounded
 
         Arpeggiator() { for (auto& n : displayNotes) n.store(-1); }
 
@@ -74,6 +100,8 @@ namespace arp
             orderCounter = 0;
             displayLength.store(0);
             displayIndex.store(-1);
+            displayStep.store(-1);
+            tagCount = 0;
         }
 
         // Consumes `in` (a block of incoming MIDI) and fills `out`. With the arp
@@ -82,6 +110,7 @@ namespace arp
                      const Settings& s, double bpm, bool hostPlaying, double hostPpq)
         {
             out.clear();
+            tagCount = 0;
             if (numSamples <= 0)
                 return;
             if (bpm <= 0.0) bpm = 120.0;
@@ -277,6 +306,28 @@ namespace arp
             }
 
             const int pos = juce::jlimit(0, numSamples - 1, (int) std::floor(t));
+            const int laneLen = juce::jlimit(1, maxSteps, s.numSteps);
+            const int lanePos = stepCounter % laneLen;
+            const Step& st = s.steps[(size_t) lanePos];
+            const bool nextTied = s.steps[(size_t) ((stepCounter + 1) % laneLen)].tie;
+            displayStep.store(lanePos);
+
+            // Swing: every second step starts later, and the step before it is longer.
+            const double swing = juce::jlimit(0.0f, 1.0f, s.swing) * 0.5;
+            const double nextStepAt = t + stepSamples * (1.0 + ((stepCounter & 1) == 0 ? swing : -swing));
+            const double gateLen = juce::jlimit(0.02f, 1.0f, s.gate) * stepSamples;
+
+            if (st.tie && soundingNote >= 0)
+            {
+                // Tie: the previous note carries on through this step. No new note-on,
+                // and the pitch sequence does not advance. It ends at this step's gate
+                // (or runs on again if the next step is tied as well).
+                gateOffAt = nextTied ? 1.0e18 : t + gateLen;
+                stepAt = nextStepAt;
+                ++stepCounter;
+                return;
+            }
+
             if (soundingNote >= 0)
             {
                 out.addEvent(juce::MidiMessage::noteOff(channel, soundingNote), pos);
@@ -293,14 +344,17 @@ namespace arp
             }
 
             const auto& n = seq[(size_t) index];
-            out.addEvent(juce::MidiMessage::noteOn(channel, n.note, n.vel), pos);
+            float vel = n.vel;
+            if (st.velocity < 1.0f)
+                vel = juce::jmax(1.0f / 127.0f, vel * juce::jmax(0.0f, st.velocity));
+            if ((st.zone > 0 || st.reverse) && tagCount < maxTags)
+                tags[(size_t) tagCount++] = { n.note, st.zone, st.reverse };
+            out.addEvent(juce::MidiMessage::noteOn(channel, n.note, vel), pos);
             soundingNote = n.note;
-            gateOffAt = t + juce::jlimit(0.02f, 1.0f, s.gate) * stepSamples;
+            gateOffAt = nextTied ? 1.0e18 : t + gateLen;
             displayIndex.store(index);
 
-            // Swing: every second step starts later, and the step before it is longer.
-            const double swing = juce::jlimit(0.0f, 1.0f, s.swing) * 0.5;
-            stepAt = t + stepSamples * (1.0 + ((stepCounter & 1) == 0 ? swing : -swing));
+            stepAt = nextStepAt;
             ++stepCounter;
         }
 
@@ -396,6 +450,9 @@ namespace arp
         int soundingNote = -1;
         double gateOffAt = 0.0;
         int channel = 1;
+
+        std::array<NoteTag, maxTags> tags;
+        int tagCount = 0;
 
         bool wasOn = false, wasLatch = false;
         int lastPattern = -1, lastOctaves = -1;
