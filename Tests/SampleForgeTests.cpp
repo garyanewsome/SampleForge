@@ -895,8 +895,8 @@ int main(int argc, char** argv)
             w->writeFromAudioSampleBuffer(b, 0, 4800);
         }
         auto setupZones = [&](Rig& r) {
-            r.proc.addZoneFromFile(low);  r.proc.getZone(0)->keyLow = 0;  r.proc.getZone(0)->keyHigh = 59;  r.proc.getZone(0)->rootNote = 60;
-            r.proc.addZoneFromFile(high); r.proc.getZone(1)->keyLow = 60; r.proc.getZone(1)->keyHigh = 127; r.proc.getZone(1)->rootNote = 60;
+            r.proc.addZoneFromFile(low);  r.proc.waitForLoads(); r.proc.getZone(0)->keyLow = 0;  r.proc.getZone(0)->keyHigh = 59;  r.proc.getZone(0)->rootNote = 60;
+            r.proc.addZoneFromFile(high); r.proc.waitForLoads(); r.proc.getZone(1)->keyLow = 60; r.proc.getZone(1)->keyHigh = 127; r.proc.getZone(1)->rootNote = 60;
             setParam(r.proc, "ARP_ON", 1.0f); setParam(r.proc, "ARP_RATE", 1.0f);
             setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
         };
@@ -915,7 +915,7 @@ int main(int argc, char** argv)
         }
 
         auto rampRig = [&](Rig& r) {
-            r.proc.addZoneFromFile(ramp); r.proc.getZone(0)->rootNote = 60;
+            r.proc.addZoneFromFile(ramp); r.proc.waitForLoads(); r.proc.getZone(0)->rootNote = 60;
             setParam(r.proc, "ARP_ON", 1.0f); setParam(r.proc, "ARP_RATE", 1.0f);
             setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
         };
