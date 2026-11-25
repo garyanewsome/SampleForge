@@ -142,6 +142,8 @@ int snapshot(const juce::File& png, int page)
     {
         setParam(proc, "ARP_ON", 1.0f); setParam(proc, "ARP_PATTERN", 2.0f); setParam(proc, "ARP_RATE", 3.0f);
         setParam(proc, "ARP_OCTAVES", 2.0f); setParam(proc, "ARP_GATE", 0.7f); setParam(proc, "ARP_SWING", 0.3f);
+        proc.arpLane[1].velocity = 0.5f; proc.arpLane[2].tie = true; proc.arpLane[3].zone = 2; proc.arpLane[5].reverse = true; proc.arpLane[6].velocity = 0.7f;
+        proc.arpNumSteps = 12;
         for (int n : { 60, 64, 67, 71 }) proc.keyboardState.noteOn(1, n, 0.8f);
         proc.setPlayConfigDetails(0, 2, 48000.0, 512);
         proc.prepareToPlay(48000.0, 512);

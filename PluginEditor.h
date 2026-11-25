@@ -69,6 +69,32 @@ private:
 };
 
 //==============================================================================
+// The arpeggiator's per-step lane: 16 columns, each with a velocity bar (drag),
+// a tie toggle (T), a reverse toggle (R) and a zone picker (click: next zone,
+// right-click: previous, "-" = normal key routing). Clicking a step number sets
+// the lane length. Edits go straight to the processor's atomics.
+class ArpLaneEditor : public juce::Component, private juce::Timer
+{
+public:
+    explicit ArpLaneEditor(SampleForgeAudioProcessor& p);
+    ~ArpLaneEditor() override;
+    void paint(juce::Graphics&) override;
+    void mouseDown(const juce::MouseEvent&) override;
+    void mouseDrag(const juce::MouseEvent&) override;
+
+private:
+    void timerCallback() override;
+    int columnAt(int x) const;
+    void setVelocityFromY(int column, int y);
+
+    SampleForgeAudioProcessor& audioProcessor;
+    int lastStep = -2, dragColumn = -1;
+    juce::uint32 lastSum = 0;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ArpLaneEditor)
+};
+
+//==============================================================================
 class SampleForgeAudioProcessorEditor  : public juce::AudioProcessorEditor,
                                           private juce::ChangeListener,
                                           private juce::ListBoxModel,
@@ -182,6 +208,7 @@ private:
     juce::Label arpOctavesLabel, arpGateLabel, arpSwingLabel;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> arpOctavesAtt, arpGateAtt, arpSwingAtt;
     ArpDisplay arpDisplay;
+    ArpLaneEditor arpLaneEditor;
 
     // Cached by resized(), drawn by paint() and drawPanel().
     juce::Rectangle<int> zonePanelBounds, envelopePanelBounds, filterPanelBounds, playbackPanelBounds, arpPanelBounds;
