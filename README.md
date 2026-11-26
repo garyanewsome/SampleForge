@@ -24,7 +24,7 @@ A polyphonic multisampled sampler VST built in C++ using the [JUCE Framework](ht
 - **Session Persistence**: Every zone's file path, key/velocity range, root note, trim, reverse/pan/gain/RR-group setting, plus all envelope/loop/filter settings, are saved with the plugin state and restored on reload.
 - **Preset Save/Load**: The entire instrument (every zone plus all global settings) can be saved to or loaded from a standalone `.sfpreset` file, independent of any DAW project.
 - **Cached Waveform Display**: Each zone builds its own `juce::AudioThumbnail` once on load, so the waveform view never rescans sample data on zone switches or window resizes, and stays responsive on long material.
-- **Thread-safe Processing**: Parameter reads use `juce::AudioProcessorValueTreeState` atomics; sample loading happens on the message thread and is swapped into the synth via JUCE's internally-locked `clearSounds()`/`addSound()`, so the audio thread never touches disk.
+- **Thread-safe Processing**: Parameter reads use `juce::AudioProcessorValueTreeState` atomics; samples are decoded on a background thread and then swapped into the synth on the message thread via JUCE's internally-locked `clearSounds()`/`addSound()`, so large sessions don't freeze the host and the audio thread never touches disk. Zones become playable as their loads finish.
 
 ## Architecture & Code Map
 
