@@ -26,6 +26,10 @@ public:
         if (rrSuppressed.load() || velSuppressed.load())
             return false;
 
+        // The arp lane picked this zone for the hit: it plays whatever the key.
+        if (arpForced.load())
+            return true;
+
         return midiNoteNumber >= keyLow.load() && midiNoteNumber <= keyHigh.load();
     }
     bool appliesToChannel(int) override { return true; }
@@ -34,7 +38,7 @@ public:
     double sourceSampleRate = 44100.0;
     juce::String filePath;
 
-    // Built in loadZoneInternal() once the AudioFormatManager/AudioThumbnailCache
+    // Built in installZone() once the AudioFormatManager/AudioThumbnailCache
     // are available; draws and caches its own peak data independently of `data`,
     // so the editor never has to rescan samples itself.
     std::unique_ptr<juce::AudioThumbnail> thumbnail;
@@ -65,6 +69,12 @@ public:
     // startNote) matters: juce::Synthesiser grabs - and if need be steals - a
     // voice for every sound appliesToNote() accepts, before startNote runs.
     std::atomic<bool> velSuppressed { false };
+
+    // Set by SampleForgeSynthesiser::noteOn() for the hit being started, from the
+    // arpeggiator's per-step lane: arpForced plays this zone regardless of its
+    // key/velocity range, arpFlipReverse inverts its Reverse setting for the hit.
+    std::atomic<bool> arpForced { false };
+    std::atomic<bool> arpFlipReverse { false };
 
     // True when the file could not be found/decoded on restore. The zone keeps
     // its path and settings (so saving again doesn't lose them) but is silent.
@@ -209,13 +219,32 @@ public:
 
     std::atomic<float>* rrOrderParam = nullptr;
 
+    // Call just before renderNextBlock() with the arp that produced this block's
+    // MIDI. Its tags (per-step zone / reverse) are matched to note-ons by note
+    // number, in order; note-ons without a tag route normally.
+    void setArpTagSource(const arp::Arpeggiator* a) { tagSource = a; tagsUsed.reset(); }
+
 private:
     static constexpr int maxRRGroups = 16;
     static constexpr int maxGroupMembers = 16;
 
     // Fixed-size, no heap allocation: noteOn() runs on the audio thread.
     int rrNextIndex[maxRRGroups] = {};
+    const arp::Arpeggiator* tagSource = nullptr;
+    std::bitset<arp::Arpeggiator::maxTags> tagsUsed;
     juce::Random random;
+};
+
+//==============================================================================
+// One entry of the arpeggiator's per-step lane as edited in the UI. Plain
+// atomics so the editor can write while the audio thread reads. Defaults are
+// "do nothing", i.e. the arp behaves as it did before the lane existed.
+struct ArpLaneStep
+{
+    std::atomic<float> velocity { 1.0f };
+    std::atomic<int> zone { 0 };
+    std::atomic<bool> reverse { false };
+    std::atomic<bool> tie { false };
 };
 
 //==============================================================================
@@ -266,15 +295,27 @@ public:
     bool savePresetToFile(const juce::File& file);
     bool loadPresetFromFile(const juce::File& file);
 
-    // Decodes an audio file on the message thread and adds it as a new zone
-    // (full key/velocity range by default), selecting it. juce::Synthesiser
-    // guards addSound()/removeSound() with its own internal lock, so this is
-    // safe to call while the audio thread is mid-renderNextBlock.
+    // Asynchronous: queues the file to be decoded on a background thread and
+    // returns immediately. When decoding finishes (on the message thread) the
+    // new zone (full key/velocity range by default) is added and selected, and
+    // a change message is sent. Until then the existing zones keep playing
+    // untouched; the audio thread never waits on a decode. If the file cannot
+    // be decoded, nothing is added. Use waitForLoads() where a synchronous
+    // result is needed (tests, offline tools).
     //
     // If a zone is currently flagged missing and has this same file name, that
     // zone is relinked to the new file (keeping its key/velocity/trim settings)
     // instead of a duplicate being added.
     void addZoneFromFile(const juce::File& file);
+
+    // Loads still queued or decoding (addZoneFromFile, setStateInformation,
+    // loadPresetFromFile). Safe from any thread.
+    int getNumPendingLoads() const { return pendingLoads.load(); }
+    bool isLoading() const { return getNumPendingLoads() > 0; }
+
+    // MESSAGE THREAD ONLY: runs the message loop until every pending load has
+    // been applied, or the timeout (ms) passes. Returns true if none remain.
+    bool waitForLoads(int timeoutMs = 30000);
 
     // Removes a zone by index. Any voice currently playing it keeps it alive
     // via the base class's ref-counted currentlyPlayingSound until it finishes.
@@ -298,16 +339,44 @@ public:
     // Exposes the arpeggiator's display state to the editor.
     const arp::Arpeggiator& getArpeggiator() const { return arpeggiator; }
 
+    // Per-step lane (velocity / zone / reverse / tie), saved with the state.
+    std::array<ArpLaneStep, arp::maxSteps> arpLane;
+    std::atomic<int> arpNumSteps { arp::maxSteps };
+    void resetArpLane();
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     // Shared by addZoneFromFile() and the state-restore path used by both
     // setStateInformation() and loadPresetFromFile(), which supply the saved
     // key/vel/root/trim/reverse/pan/gain/rrGroup instead of these defaults.
-    bool loadZoneInternal(const juce::File& file, int keyLow, int keyHigh, int velLow, int velHigh,
-                          int rootNote, float sampleStart, float sampleEnd,
-                          bool reverse = false, float pan = 0.0f, float gain = 1.0f, int rrGroup = 0,
-                          bool keepIfMissing = false);
+    struct ZoneSettings
+    {
+        int keyLow = 0, keyHigh = 127, velLow = 0, velHigh = 127, rootNote = 60;
+        float sampleStart = 0.0f, sampleEnd = 1.0f, pan = 0.0f, gain = 1.0f;
+        bool reverse = false;
+        int rrGroup = 0;
+    };
+
+    // Decodes `file` into a new (not yet added) sound. Runs on the background
+    // thread. Returns null if the file can't be decoded and !keepIfMissing, or
+    // if `shouldAbort` returns true part-way through.
+    juce::ReferenceCountedObjectPtr<SampleForgeSound> decodeZone(const juce::File& file, const ZoneSettings& s,
+                                                                 bool keepIfMissing,
+                                                                 const std::function<bool()>& shouldAbort);
+
+    // Message thread: attaches the thumbnail and adds the sound to the synth.
+    void installZone(SampleForgeSound* sound);
+
+    struct RestoreEntry { juce::String path, relPath; ZoneSettings settings; };
+    void finishAddZone(juce::ReferenceCountedObjectPtr<SampleForgeSound> sound, int generation);
+    void finishRestore(std::vector<juce::ReferenceCountedObjectPtr<SampleForgeSound>> sounds, int generation);
+
+    std::atomic<bool> shuttingDown { false };
+    juce::ThreadPool loadPool { 1 };               // one thread: loads finish in request order
+    std::atomic<int> pendingLoads { 0 };
+    // Bumped by every state/preset restore; results of older requests are dropped.
+    std::atomic<int> loadGeneration { 0 };
 
     // Shared by getStateInformation()/savePresetToFile() and by
     // setStateInformation()/loadPresetFromFile() respectively — a "preset"
@@ -339,6 +408,9 @@ private:
     std::atomic<float>* arpSwing = nullptr;
     std::atomic<float>* arpLatch = nullptr;
 
+    void appendArpLaneXml(juce::XmlElement& xml) const;
+    void restoreArpLaneXml(const juce::XmlElement& xml);
+
     int selectedZoneIndex = -1;
 
     // Updated from getPlayHead() at the top of processBlock(); read live by
@@ -348,4 +420,5 @@ private:
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SampleForgeAudioProcessor)
+    JUCE_DECLARE_WEAK_REFERENCEABLE(SampleForgeAudioProcessor)
 };

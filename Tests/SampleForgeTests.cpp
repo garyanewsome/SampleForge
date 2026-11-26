@@ -131,9 +131,9 @@ int snapshot(const juce::File& png, int page)
         return (float) (0.9 * std::exp(-t * 14.0) * (0.6 * std::sin(tau * 190.0 * t) + 0.9 * ((std::fmod(t * 7919.0, 1.0)) - 0.5))); });
 
     SampleForgeAudioProcessor proc;
-    proc.addZoneFromFile(pluck); proc.getZone(0)->keyLow = 28; proc.getZone(0)->keyHigh = 47; proc.getZone(0)->rootNote = 40; proc.getZone(0)->rrGroup = 1;
-    proc.addZoneFromFile(hit);   proc.getZone(1)->keyLow = 48; proc.getZone(1)->keyHigh = 59; proc.getZone(1)->rootNote = 54; proc.getZone(1)->velHigh = 90;
-    proc.addZoneFromFile(pad);   proc.getZone(2)->keyLow = 60; proc.getZone(2)->keyHigh = 83; proc.getZone(2)->rootNote = 60; proc.getZone(2)->sampleStart = 0.08f; proc.getZone(2)->sampleEnd = 0.86f;
+    proc.addZoneFromFile(pluck); proc.waitForLoads(); proc.getZone(0)->keyLow = 28; proc.getZone(0)->keyHigh = 47; proc.getZone(0)->rootNote = 40; proc.getZone(0)->rrGroup = 1;
+    proc.addZoneFromFile(hit); proc.waitForLoads();   proc.getZone(1)->keyLow = 48; proc.getZone(1)->keyHigh = 59; proc.getZone(1)->rootNote = 54; proc.getZone(1)->velHigh = 90;
+    proc.addZoneFromFile(pad); proc.waitForLoads();   proc.getZone(2)->keyLow = 60; proc.getZone(2)->keyHigh = 83; proc.getZone(2)->rootNote = 60; proc.getZone(2)->sampleStart = 0.08f; proc.getZone(2)->sampleEnd = 0.86f;
     proc.setSelectedZoneIndex(2);
     setParam(proc, "SUSTAIN", 0.7f); setParam(proc, "RELEASE", 0.8f); setParam(proc, "FILTER_CUTOFF", 4200.0f);
     setParam(proc, "FILTER_RESONANCE", 1.4f); setParam(proc, "FILTER_ENV_AMOUNT", 1.0f); setParam(proc, "STRETCH", 1.5f); setParam(proc, "LOOP_MODE", 1.0f);
@@ -142,6 +142,8 @@ int snapshot(const juce::File& png, int page)
     {
         setParam(proc, "ARP_ON", 1.0f); setParam(proc, "ARP_PATTERN", 2.0f); setParam(proc, "ARP_RATE", 3.0f);
         setParam(proc, "ARP_OCTAVES", 2.0f); setParam(proc, "ARP_GATE", 0.7f); setParam(proc, "ARP_SWING", 0.3f);
+        proc.arpLane[1].velocity = 0.5f; proc.arpLane[2].tie = true; proc.arpLane[3].zone = 2; proc.arpLane[5].reverse = true; proc.arpLane[6].velocity = 0.7f;
+        proc.arpNumSteps = 12;
         for (int n : { 60, 64, 67, 71 }) proc.keyboardState.noteOn(1, n, 0.8f);
         proc.setPlayConfigDetails(0, 2, 48000.0, 512);
         proc.prepareToPlay(48000.0, 512);
@@ -166,6 +168,49 @@ int snapshot(const juce::File& png, int page)
     return 0;
 }
 
+// FNV-1a over every note event an arp produces for a fixed scenario. The expected
+// values below were captured from the arpeggiator BEFORE the per-step lane existed.
+juce::uint64 arpGoldenHash(int scenario)
+{
+    using namespace arp;
+    Settings s; s.on = true;
+    s.gate = 0.55f; s.swing = 0.0f; s.octaves = 1; s.pattern = Up; s.rate = 3; s.latch = false;
+    int block = 512; double bpm = 120.0;
+    struct Ev { int pos; int note; bool on; };
+    std::vector<Ev> input { { 0, 64, true }, { 0, 60, true }, { 0, 67, true }, { 5000, 71, true }, { 30000, 64, false }, { 52000, 60, false }, { 60000, 71, false } };
+    switch (scenario)
+    {
+        case 0: break;
+        case 1: s.pattern = Down; s.octaves = 2; break;
+        case 2: s.pattern = UpDown; s.swing = 0.4f; s.gate = 1.0f; break;
+        case 3: s.pattern = DownUp; s.rate = 4; s.octaves = 3; bpm = 97.0; block = 64; break;
+        case 4: s.pattern = AsPlayed; s.rate = 1; s.gate = 0.1f; block = 2048; break;
+        case 5: s.pattern = arp::Random; s.octaves = 2; break;
+        case 6: s.latch = true; s.swing = 1.0f; break;
+        default: break;
+    }
+    Arpeggiator a; a.reset();
+    juce::MidiBuffer in, out;
+    juce::uint64 h = 1469598103934665603ull;
+    auto mix = [&](juce::uint64 v) { h ^= v; h *= 1099511628211ull; };
+    for (int start = 0; start < 96000; start += block)
+    {
+        in.clear();
+        for (auto& e : input)
+            if (e.pos >= start && e.pos < start + block)
+                in.addEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, 0.8f) : juce::MidiMessage::noteOff(1, e.note), e.pos - start);
+        a.process(in, out, block, 48000.0, s, bpm, false, -1.0);
+        for (const auto meta : out)
+        {
+            auto m = meta.getMessage();
+            mix((juce::uint64) (start + meta.samplePosition));
+            mix((juce::uint64) m.getNoteNumber());
+            mix((juce::uint64) (m.isNoteOn() ? m.getVelocity() + 1000 : 1));
+        }
+    }
+    return h;
+}
+
 int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI gui;
@@ -179,8 +224,8 @@ int main(int argc, char** argv)
         auto soft = makeWav("soft.wav", 48000, 96000, 0, 330.0f);
         Rig r;
         setParam(r.proc, "LOOP_MODE", 1.0f);
-        r.proc.addZoneFromFile(loud);   // matches high velocity, added first
-        r.proc.addZoneFromFile(soft);   // matches low velocity, added second
+        r.proc.addZoneFromFile(loud); r.proc.waitForLoads();   // matches high velocity, added first
+        r.proc.addZoneFromFile(soft); r.proc.waitForLoads();   // matches low velocity, added second
         r.proc.getZone(0)->velLow = 64;
         r.proc.getZone(1)->velHigh = 63;
         std::vector<std::pair<int, float>> notes;
@@ -190,8 +235,8 @@ int main(int argc, char** argv)
 
         Rig q;
         setParam(q.proc, "LOOP_MODE", 1.0f);
-        q.proc.addZoneFromFile(loud);
-        q.proc.addZoneFromFile(soft);
+        q.proc.addZoneFromFile(loud); q.proc.waitForLoads();
+        q.proc.addZoneFromFile(soft); q.proc.waitForLoads();
         q.proc.getZone(0)->velLow = 64;
         q.proc.getZone(1)->velHigh = 63;
         auto lo = q.render(4, { { 60, 0.15f } });
@@ -205,7 +250,7 @@ int main(int argc, char** argv)
             auto f = makeWav("tone" + juce::String((int) fileRate) + ".wav", fileRate, (int) fileRate, 0, 440.0f);
             auto length = [&](float stretch) {
                 Rig r;
-                r.proc.addZoneFromFile(f);
+                r.proc.addZoneFromFile(f); r.proc.waitForLoads();
                 r.proc.getZone(0)->rootNote = 69;
                 setParam(r.proc, "STRETCH", stretch);
                 auto out = r.render(48000 * 4 / 256, { { 69, 1.0f } });
@@ -225,7 +270,7 @@ int main(int argc, char** argv)
         juce::MemoryBlock saved;
         {
             Rig r;
-            r.proc.addZoneFromFile(f);
+            r.proc.addZoneFromFile(f); r.proc.waitForLoads();
             r.proc.getZone(0)->keyLow = 40;
             r.proc.getZone(0)->rootNote = 50;
             r.proc.getZone(0)->rrGroup = 2;
@@ -235,7 +280,7 @@ int main(int argc, char** argv)
         f.moveFileTo(backup);
         {
             Rig r;
-            r.proc.setStateInformation(saved.getData(), (int) saved.getSize());
+            r.proc.setStateInformation(saved.getData(), (int) saved.getSize()); r.proc.waitForLoads();
             check(r.proc.getNumZones() == 1, "the zone survives the load");
             auto* z = r.proc.getZone(0);
             check(z != nullptr && z->missing, "it is flagged as missing");
@@ -245,7 +290,7 @@ int main(int argc, char** argv)
             r.proc.getStateInformation(again);
             backup.moveFileTo(f);
             Rig s;
-            s.proc.setStateInformation(again.getData(), (int) again.getSize());
+            s.proc.setStateInformation(again.getData(), (int) again.getSize()); s.proc.waitForLoads();
             auto* z2 = s.proc.getZone(0);
             check(z2 != nullptr && !z2->missing && z2->keyLow.load() == 40, "re-saved state restores fully once the file is back");
             check(peak(s.render(8, { { 50, 1.0f } })) > 0.01f, "and it plays again");
@@ -256,7 +301,7 @@ int main(int argc, char** argv)
         std::cout << "[4] One-shots fade out instead of ending on a hard cut\n";
         auto f = makeWav("dc.wav", 48000, 4800, 1, 0.5f);
         Rig r;
-        r.proc.addZoneFromFile(f);
+        r.proc.addZoneFromFile(f); r.proc.waitForLoads();
         setParam(r.proc, "ATTACK", 0.001f);
         auto out = r.render(40, { { 60, 1.0f } });
         int end = lengthAbove(out, 1.0e-5f);
@@ -271,8 +316,8 @@ int main(int argc, char** argv)
         auto a = makeWav("rr_a.wav", 48000, 2000, 1, 0.2f);
         auto b = makeWav("rr_b.wav", 48000, 2000, 1, 0.6f);
         Rig r;
-        r.proc.addZoneFromFile(a);
-        r.proc.addZoneFromFile(b);
+        r.proc.addZoneFromFile(a); r.proc.waitForLoads();
+        r.proc.addZoneFromFile(b); r.proc.waitForLoads();
         r.proc.getZone(0)->rrGroup = 1;
         r.proc.getZone(1)->rrGroup = 1;
         std::vector<float> peaks;
@@ -286,8 +331,8 @@ int main(int argc, char** argv)
         auto a = makeWav("ed_a.wav", 48000, 24000, 0, 440.0f);
         auto b = makeWav("ed_b.wav", 48000, 24000, 0, 330.0f);
         SampleForgeAudioProcessor proc;
-        proc.addZoneFromFile(a);
-        proc.addZoneFromFile(b);
+        proc.addZoneFromFile(a); proc.waitForLoads();
+        proc.addZoneFromFile(b); proc.waitForLoads();
         std::unique_ptr<juce::AudioProcessorEditor> ed(proc.createEditor());
         ed->setBounds(0, 0, 1280, 770);
         pumpMessages(100);
@@ -314,7 +359,7 @@ int main(int argc, char** argv)
         }
         auto biggestStep = [&](int loopMode) {
             Rig r;
-            r.proc.addZoneFromFile(f);
+            r.proc.addZoneFromFile(f); r.proc.waitForLoads();
             setParam(r.proc, "LOOP_MODE", (float) loopMode);
             setParam(r.proc, "ATTACK", 0.001f);
             auto out = r.render(60, { { 60, 1.0f } });
@@ -335,7 +380,7 @@ int main(int argc, char** argv)
         auto presetFile = dirA.getChildFile("kit.sfpreset");
         {
             Rig r;
-            r.proc.addZoneFromFile(wavA);
+            r.proc.addZoneFromFile(wavA); r.proc.waitForLoads();
             r.proc.getZone(0)->keyLow = 36;
             r.proc.getZone(0)->keyHigh = 48;
             check(r.proc.savePresetToFile(presetFile), "preset saved next to its sample");
@@ -343,23 +388,23 @@ int main(int argc, char** argv)
         dirA.moveFileTo(dirB);                                   // the whole folder moves
         {
             Rig r;
-            check(r.proc.loadPresetFromFile(dirB.getChildFile("kit.sfpreset")), "moved preset loads");
+            check(r.proc.loadPresetFromFile(dirB.getChildFile("kit.sfpreset")), "moved preset loads"); r.proc.waitForLoads();
             auto* z = r.proc.getZone(0);
             check(z != nullptr && !z->missing && z->keyLow.load() == 36, "its sample was found beside it");
         }
         // Relink: a missing zone adopts a dropped file of the same name and keeps its settings.
         {
             Rig r;
-            r.proc.addZoneFromFile(dirB.getChildFile("kick.wav"));
+            r.proc.addZoneFromFile(dirB.getChildFile("kick.wav")); r.proc.waitForLoads();
             r.proc.getZone(0)->keyLow = 30;
             juce::MemoryBlock st; r.proc.getStateInformation(st);
             auto moved = dirB.getChildFile("kick.wav").moveFileTo(tempDir().getChildFile("kick_elsewhere.wav"));
             Rig q;
-            q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            q.proc.setStateInformation(st.getData(), (int) st.getSize()); q.proc.waitForLoads();
             check(q.proc.getZone(0) != nullptr && q.proc.getZone(0)->missing, "with the file gone the zone is missing");
             auto back = dirB.getChildFile("kick.wav");
             tempDir().getChildFile("kick_elsewhere.wav").moveFileTo(back);
-            q.proc.addZoneFromFile(back);
+            q.proc.addZoneFromFile(back); q.proc.waitForLoads();
             check(q.proc.getNumZones() == 1 && !q.proc.getZone(0)->missing && q.proc.getZone(0)->keyLow.load() == 30,
                   "dropping the file relinks the same zone with its settings");
             (void) moved;
@@ -376,7 +421,7 @@ int main(int argc, char** argv)
         };
         auto run = [&](float range, int wheelBefore, int wheelAfter) {
             Rig r;
-            r.proc.addZoneFromFile(tone);
+            r.proc.addZoneFromFile(tone); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 69;
             setParam(r.proc, "BEND_RANGE", range);
             std::vector<std::pair<int, juce::MidiMessage>> extra;
@@ -424,7 +469,7 @@ int main(int argc, char** argv)
         };
         auto bursty = [&](float stretch, int loopMode) {
             Rig r;
-            r.proc.addZoneFromFile(bursts);
+            r.proc.addZoneFromFile(bursts); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 69;
             setParam(r.proc, "LOOP_MODE", (float) loopMode);
             setParam(r.proc, "STRETCH", stretch);
@@ -442,7 +487,7 @@ int main(int argc, char** argv)
         auto odd = makeWav("odd.wav", 48000, 22222, 0, 441.37f);
         auto step = [&](bool stretched) -> double {
             Rig r;
-            r.proc.addZoneFromFile(odd);
+            r.proc.addZoneFromFile(odd); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 69;
             setParam(r.proc, "LOOP_MODE", 1.0f);
             setParam(r.proc, "ATTACK", 0.001f);
@@ -470,7 +515,7 @@ int main(int argc, char** argv)
             w->writeFromAudioSampleBuffer(b, 0, 48000);
         }
         Rig rv;
-        rv.proc.addZoneFromFile(swell);
+        rv.proc.addZoneFromFile(swell); rv.proc.waitForLoads();
         rv.proc.getZone(0)->rootNote = 69;
         rv.proc.getZone(0)->reverse = true;
         setParam(rv.proc, "STRETCH", 2.0f);
@@ -608,7 +653,7 @@ int main(int argc, char** argv)
             return count;
         };
         auto setup = [&](Rig& r) {
-            r.proc.addZoneFromFile(hit);
+            r.proc.addZoneFromFile(hit); r.proc.waitForLoads();
             r.proc.getZone(0)->rootNote = 60;
             setParam(r.proc, "ARP_ON", 1.0f);
             setParam(r.proc, "ARP_RATE", 3.0f);      // 1/16
@@ -638,12 +683,265 @@ int main(int argc, char** argv)
             setParam(r.proc, "ARP_PATTERN", 2.0f); setParam(r.proc, "ARP_GATE", 0.8f); setParam(r.proc, "ARP_OCTAVES", 3.0f);
             juce::MemoryBlock st; r.proc.getStateInformation(st);
             Rig q;
-            q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            q.proc.setStateInformation(st.getData(), (int) st.getSize()); q.proc.waitForLoads();
             check(q.proc.apvts.getRawParameterValue("ARP_PATTERN")->load() == 2.0f
                   && q.proc.apvts.getRawParameterValue("ARP_OCTAVES")->load() == 3.0f
                   && std::abs(q.proc.apvts.getRawParameterValue("ARP_GATE")->load() - 0.8f) < 1e-4f
                   && q.proc.apvts.getRawParameterValue("ARP_ON")->load() > 0.5f,
                   "arp settings are saved with the session");
+        }
+    }
+
+    {
+        std::cout << "[13] Asynchronous sample loading\n";
+        auto big = makeWav("async_big.wav", 48000, 48000 * 60, 1, 0.5f);      // 60 s: slow enough to see
+        auto small = makeWav("async_small.wav", 48000, 4800, 1, 0.25f);
+        auto bad = tempDir().getChildFile("async_not_audio.wav");
+        bad.replaceWithText("this is not audio");
+
+        {   // addZoneFromFile returns before decoding finishes, and the audio thread is never blocked
+            Rig r;
+            r.proc.addZoneFromFile(small); r.proc.waitForLoads();
+            r.proc.getZone(0)->rootNote = 60;
+            setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
+            auto t0 = juce::Time::getMillisecondCounterHiRes();
+            r.proc.addZoneFromFile(big);
+            double callMs = juce::Time::getMillisecondCounterHiRes() - t0;
+            check(callMs < 50.0, "addZoneFromFile returns immediately (" + juce::String(callMs, 1) + " ms)");
+            check(r.proc.isLoading() || r.proc.getNumZones() == 2, "a load is pending (or already finished)");
+            // keep rendering with the old zone while the big one decodes
+            float worstBlockMs = 0; int blocks = 0; bool sounded = false;
+            juce::AudioBuffer<float> buf(2, r.block);
+            while (r.proc.isLoading() && blocks < 20000)
+            {
+                buf.clear(); juce::MidiBuffer midi;
+                if (blocks % 50 == 0) midi.addEvent(juce::MidiMessage::noteOn(1, 60, 1.0f), 0);
+                auto b0 = juce::Time::getMillisecondCounterHiRes();
+                r.proc.processBlock(buf, midi);
+                worstBlockMs = std::max<float>(worstBlockMs, (float) (juce::Time::getMillisecondCounterHiRes() - b0));
+                if (buf.getMagnitude(0, 0, r.block) > 0.01f) sounded = true;
+                ++blocks;
+                juce::MessageManager::getInstance()->runDispatchLoopUntil(1);
+            }
+            check(sounded, "the existing zone keeps sounding while the new one loads");
+            check(r.proc.waitForLoads() && r.proc.getNumZones() == 2, "the big file arrives as a second zone");
+            check(r.proc.getZone(1)->data.getNumSamples() == 48000 * 60, "decoded in full");
+            check(r.proc.getSelectedZoneIndex() == 1, "the new zone is selected");
+            std::cout << "        (worst block while loading: " << worstBlockMs << " ms over " << blocks << " blocks)\n";
+        }
+        {   // undecodable file adds nothing and does not wedge the loader
+            Rig r;
+            r.proc.addZoneFromFile(bad); r.proc.addZoneFromFile(small);
+            check(r.proc.waitForLoads(), "loads finish");
+            check(r.proc.getNumZones() == 1, "a bad file adds no zone but the next file still loads");
+        }
+        {   // repeated loads keep request order
+            Rig r;
+            r.proc.addZoneFromFile(big); r.proc.addZoneFromFile(small); r.proc.addZoneFromFile(small);
+            check(r.proc.waitForLoads() && r.proc.getNumZones() == 3, "three queued loads all land");
+            check(r.proc.getZone(0)->data.getNumSamples() == 48000 * 60 && r.proc.getZone(1)->data.getNumSamples() == 4800,
+                  "in the order requested");
+        }
+        {   // state restore is async; old zones play until the new set swaps in; a newer restore wins
+            Rig a; a.proc.addZoneFromFile(small); a.proc.waitForLoads(); a.proc.getZone(0)->keyLow = 20;
+            juce::MemoryBlock stSmall; a.proc.getStateInformation(stSmall);
+            Rig b; b.proc.addZoneFromFile(big); b.proc.addZoneFromFile(big); b.proc.waitForLoads(); b.proc.getZone(0)->keyLow = 30;
+            juce::MemoryBlock stBig; b.proc.getStateInformation(stBig);
+
+            Rig r;
+            r.proc.addZoneFromFile(small); r.proc.waitForLoads();
+            r.proc.setStateInformation(stBig.getData(), (int) stBig.getSize());
+            check(r.proc.getNumZones() == 1 && r.proc.getZone(0)->data.getNumSamples() == 4800,
+                  "setStateInformation returns with the old zones still in place");
+            r.proc.setStateInformation(stSmall.getData(), (int) stSmall.getSize());   // supersedes the big restore
+            check(r.proc.waitForLoads(), "restores finish");
+            check(r.proc.getNumZones() == 1 && r.proc.getZone(0)->keyLow.load() == 20 && r.proc.getZone(0)->data.getNumSamples() == 4800,
+                  "the latest restore wins; the superseded one is dropped");
+            // a load requested before a restore must not resurrect after it
+            r.proc.addZoneFromFile(small);
+            r.proc.setStateInformation(stSmall.getData(), (int) stSmall.getSize());
+            r.proc.waitForLoads();
+            check(r.proc.getNumZones() == 1, "an add requested before a restore is discarded by it");
+        }
+        {   // destroying the plugin mid-load is safe and prompt
+            auto t0 = juce::Time::getMillisecondCounterHiRes();
+            {
+                auto* p = new SampleForgeAudioProcessor();
+                p->addZoneFromFile(big); p->addZoneFromFile(big); p->addZoneFromFile(big);
+                juce::Thread::sleep(20);
+                delete p;
+            }
+            pumpMessages(300);                      // stale completion callbacks must find nothing
+            double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+            check(ms < 3000.0, "plugin destroyed mid-load without crash or long stall (" + juce::String(ms, 0) + " ms)");
+        }
+    }
+
+    {
+        std::cout << "[14] Arpeggiator per-step lane: velocity, ties, zone, reverse\n";
+        using namespace arp;
+        struct Ev { int pos; int note; bool on; int vel; };
+        auto runArp = [](const Settings& s, const std::vector<Ev>& input, int totalSamples, int block, std::vector<NoteTag>* tags = nullptr) {
+            Arpeggiator a; a.reset();
+            std::vector<Ev> result;
+            juce::MidiBuffer in, out;
+            for (int start = 0; start < totalSamples; start += block)
+            {
+                in.clear();
+                for (auto& e : input)
+                    if (e.pos >= start && e.pos < start + block)
+                        in.addEvent(e.on ? juce::MidiMessage::noteOn(1, e.note, 0.8f) : juce::MidiMessage::noteOff(1, e.note), e.pos - start);
+                a.process(in, out, block, 48000.0, s, 120.0, false, -1.0);
+                if (tags != nullptr)
+                    for (int i = 0; i < a.numTags(); ++i) tags->push_back(a.tag(i));
+                for (const auto meta : out)
+                {
+                    auto m = meta.getMessage();
+                    if (m.isNoteOnOrOff()) result.push_back({ start + meta.samplePosition, m.getNoteNumber(), m.isNoteOn(), m.getVelocity() });
+                }
+            }
+            return result;
+        };
+        auto ons = [](const std::vector<Ev>& v) { std::vector<Ev> r; for (auto& e : v) if (e.on) r.push_back(e); return r; };
+        auto offs = [](const std::vector<Ev>& v) { std::vector<Ev> r; for (auto& e : v) if (!e.on) r.push_back(e); return r; };
+        const int step16 = 6000;
+        const std::vector<Ev> chord { { 0, 60, true, 0 }, { 0, 64, true, 0 }, { 0, 67, true, 0 } };
+
+        // Defaults reproduce the pre-lane output bit for bit (hashes captured from the old engine).
+        const juce::uint64 golden[] = { 6359035928952968032ull, 4198607907181958900ull, 7206125683372040994ull, 15298489760740847329ull,
+                                        14739403644682878734ull, 15027483251730415700ull, 1153527310852296291ull };
+        for (int i = 0; i < 7; ++i)
+            check(arpGoldenHash(i) == golden[i], "default lane reproduces the old arp output exactly (scenario " + juce::String(i) + ")");
+
+        Settings s; s.on = true; s.gate = 0.5f;
+
+        // Velocity: scales the played velocity (0.8 -> 102 at 1.0).
+        {
+            auto t = s; t.numSteps = 2; t.steps[1].velocity = 0.5f;
+            auto o = ons(runArp(t, chord, step16 * 4, 512));
+            check(o.size() >= 4 && o[0].vel == 102 && o[2].vel == 102, "step velocity 1.0 plays the key velocity as played");
+            check(o.size() >= 4 && std::abs(o[1].vel - 51) <= 1 && std::abs(o[3].vel - 51) <= 1, "step velocity 0.5 halves it (" + juce::String(o.size() > 1 ? o[1].vel : -1) + ")");
+            auto z = s; z.numSteps = 1; z.steps[0].velocity = 0.0f;
+            auto zo = ons(runArp(z, chord, step16 * 2, 512));
+            check(!zo.empty() && zo[0].vel >= 1, "velocity 0 still plays a note (never becomes a note-off)");
+        }
+
+        // Tie: step 1 holds step 0's note; no retrigger, pitch does not advance.
+        {
+            auto t = s; t.numSteps = 4; t.steps[1].tie = true;
+            auto ev = runArp(t, chord, step16 * 8, 512);
+            auto o = ons(ev), f = offs(ev);
+            check(o.size() >= 5 && o[0].note == 60 && o[1].note == 64 && o[2].note == 67 && o[3].note == 60,
+                  "a tied step plays no note and the pitch sequence does not advance");
+            check(o.size() >= 3 && o[0].pos == 0 && std::abs(o[1].pos - 2 * step16) <= 1 && std::abs(o[2].pos - 3 * step16) <= 1,
+                  "after a tie the next note lands on its normal grid step");
+            check(!f.empty() && f[0].note == 60 && std::abs(f[0].pos - (step16 + step16 / 2)) <= 1,
+                  "the held note ends at the tied step's gate (" + juce::String(f.empty() ? -1 : f[0].pos) + ", expected 9000)");
+            check(f.size() >= 2 && std::abs(f[1].pos - (2 * step16 + step16 / 2)) <= 1, "untied notes keep their normal gate");
+        }
+        // Two ties in a row hold across both steps.
+        {
+            auto t = s; t.numSteps = 4; t.steps[1].tie = true; t.steps[2].tie = true;
+            auto ev = runArp(t, chord, step16 * 6, 512);
+            auto f = offs(ev);
+            check(!f.empty() && f[0].note == 60 && std::abs(f[0].pos - (2 * step16 + step16 / 2)) <= 1, "chained ties hold the note through every tied step");
+        }
+        // A tie with nothing sounding (first step of the run) just plays a note.
+        {
+            auto t = s; t.numSteps = 4; t.steps[0].tie = true;
+            auto o = ons(runArp(t, chord, step16 * 3, 512));
+            check(!o.empty() && o[0].pos == 0 && o[0].note == 60, "a tie on the very first step still sounds");
+        }
+        // Ties are block-size independent and never leave a stuck note after release.
+        {
+            auto t = s; t.numSteps = 4; t.steps[1].tie = true; t.steps[3].tie = true;
+            auto a = runArp(t, chord, step16 * 9, 64), b = runArp(t, chord, step16 * 9, 2048);
+            bool same = a.size() == b.size();
+            for (size_t i = 0; same && i < a.size(); ++i) same = a[i].pos == b[i].pos && a[i].note == b[i].note && a[i].on == b[i].on;
+            check(same, "tied output is identical at 64 and 2048 samples per block");
+            auto in = chord; in.push_back({ step16 + 100, 60, false, 0 }); in.push_back({ step16 + 100, 64, false, 0 }); in.push_back({ step16 + 100, 67, false, 0 });
+            auto ev = runArp(t, in, step16 * 4, 512);
+            int on = 0; for (auto& e : ev) on += e.on ? 1 : -1;
+            check(on == 0 && !ev.empty() && !ev.back().on, "releasing the keys during a tie ends the held note");
+        }
+
+        // Tags: zone / reverse requests are emitted per note-on, only when asked for.
+        {
+            auto t = s; t.numSteps = 3; t.steps[1].zone = 2; t.steps[2].reverse = true;
+            std::vector<NoteTag> tags;
+            runArp(t, chord, step16 * 3, 512, &tags);
+            check(tags.size() == 2 && tags[0].note == 64 && tags[0].zone == 2 && !tags[0].reverse
+                  && tags[1].note == 67 && tags[1].zone == 0 && tags[1].reverse, "only steps that ask for a zone or reverse produce tags, with the note they belong to");
+            std::vector<NoteTag> none;
+            runArp(s, chord, step16 * 3, 512, &none);
+            check(none.empty(), "default lane produces no tags");
+        }
+    }
+
+    {
+        std::cout << "[15] Per-step lane inside the plugin\n";
+        auto low = makeWav("lane_low.wav", 48000, 4000, 1, 0.2f);
+        auto high = makeWav("lane_high.wav", 48000, 4000, 1, 0.6f);
+        // A rising ramp: forward it starts near silence, reversed it starts loud.
+        auto ramp = tempDir().getChildFile("lane_ramp.wav");
+        {
+            ramp.deleteFile();
+            juce::AudioBuffer<float> b(2, 4800);
+            for (int i = 0; i < 4800; ++i) { b.setSample(0, i, 0.8f * i / 4800.0f); b.setSample(1, i, 0.8f * i / 4800.0f); }
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::FileOutputStream> out(ramp.createOutputStream());
+            std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(out.get(), 48000.0, 2, 24, {}, 0));
+            out.release();
+            w->writeFromAudioSampleBuffer(b, 0, 4800);
+        }
+        auto setupZones = [&](Rig& r) {
+            r.proc.addZoneFromFile(low);  r.proc.waitForLoads(); r.proc.getZone(0)->keyLow = 0;  r.proc.getZone(0)->keyHigh = 59;  r.proc.getZone(0)->rootNote = 60;
+            r.proc.addZoneFromFile(high); r.proc.waitForLoads(); r.proc.getZone(1)->keyLow = 60; r.proc.getZone(1)->keyHigh = 127; r.proc.getZone(1)->rootNote = 60;
+            setParam(r.proc, "ARP_ON", 1.0f); setParam(r.proc, "ARP_RATE", 1.0f);
+            setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
+        };
+        auto firstHit = [&](Rig& r) { auto o = r.render(20, { { 60, 1.0f } }); o.resize(2000); return peak(o); };
+
+        { Rig r; setupZones(r); float p = firstHit(r); check(p > 0.3f, "no lane: note 60 plays the zone whose key range holds it (peak " + juce::String(p, 2) + ")"); }
+        { Rig r; setupZones(r); r.proc.arpLane[0].zone = 1; float p = firstHit(r);
+          check(p > 0.05f && p < 0.3f, "lane zone 1 plays the first zone even though note 60 is outside its key range (peak " + juce::String(p, 2) + ")"); }
+        { Rig r; setupZones(r); r.proc.arpLane[0].zone = 2; float p = firstHit(r); check(p > 0.3f, "lane zone 2 plays only the second zone"); }
+        { Rig r; setupZones(r); r.proc.arpLane[0].zone = 9; float p = firstHit(r); check(p > 0.3f, "a zone number beyond the zone count falls back to normal routing"); }
+        {   // The forced zone must not leak into later hits: step 1 is back to normal routing.
+            Rig r; setupZones(r); r.proc.arpNumSteps = 2; r.proc.arpLane[0].zone = 1;
+            auto o = r.render(60, { { 60, 1.0f } });   // 1/8 at 120 BPM = 12000 samples a step
+            std::vector<float> a(o.begin(), o.begin() + 2000), b(o.begin() + 12000, o.begin() + 14000);
+            check(peak(a) < 0.3f && peak(b) > 0.3f, "a step's zone choice does not stick to the next step");
+        }
+
+        auto rampRig = [&](Rig& r) {
+            r.proc.addZoneFromFile(ramp); r.proc.waitForLoads(); r.proc.getZone(0)->rootNote = 60;
+            setParam(r.proc, "ARP_ON", 1.0f); setParam(r.proc, "ARP_RATE", 1.0f);
+            setParam(r.proc, "ATTACK", 0.001f); setParam(r.proc, "RELEASE", 0.001f);
+        };
+        auto early = [&](Rig& r) { auto o = r.render(10, { { 60, 1.0f } }); float s = 0; for (int i = 100; i < 300; ++i) s += std::abs(o[(size_t) i]); return s / 200.0f; };
+        { Rig r; rampRig(r); float e = early(r); check(e < 0.1f, "forward ramp starts quietly (" + juce::String(e, 3) + ")"); }
+        { Rig r; rampRig(r); r.proc.arpLane[0].reverse = true; float e = early(r); check(e > 0.25f, "a reversed step plays the sample backwards (" + juce::String(e, 3) + ")"); }
+        { Rig r; rampRig(r); r.proc.getZone(0)->reverse = true; r.proc.arpLane[0].reverse = true; float e = early(r);
+          check(e < 0.1f, "a reversed step on an already-reversed zone flips it back to forwards"); }
+        { Rig r; rampRig(r); r.proc.getZone(0)->reverse = true; float e = early(r); check(e > 0.25f, "zone Reverse alone is unchanged by the lane"); }
+
+        // State.
+        {
+            Rig r; setupZones(r);
+            juce::MemoryBlock plain; r.proc.getStateInformation(plain);
+            auto xml = juce::AudioProcessor::getXmlFromBinary(plain.getData(), (int) plain.getSize());
+            check(xml != nullptr && xml->getChildByName("ARPLANE") == nullptr, "an untouched lane adds nothing to the saved state");
+
+            r.proc.arpNumSteps = 5; r.proc.arpLane[2].tie = true; r.proc.arpLane[3].zone = 2; r.proc.arpLane[4].reverse = true; r.proc.arpLane[1].velocity = 0.25f;
+            juce::MemoryBlock st; r.proc.getStateInformation(st);
+            Rig q; q.proc.setStateInformation(st.getData(), (int) st.getSize());
+            check(q.proc.arpNumSteps == 5 && q.proc.arpLane[2].tie && q.proc.arpLane[3].zone == 2 && q.proc.arpLane[4].reverse
+                  && std::abs(q.proc.arpLane[1].velocity.load() - 0.25f) < 1e-4f && !q.proc.arpLane[0].tie, "the lane is saved and restored with the session");
+
+            q.proc.setStateInformation(plain.getData(), (int) plain.getSize());
+            check(q.proc.arpNumSteps == 16 && !q.proc.arpLane[2].tie && q.proc.arpLane[3].zone == 0 && q.proc.arpLane[1].velocity == 1.0f,
+                  "state saved without a lane (older sessions) restores the default lane");
         }
     }
 
